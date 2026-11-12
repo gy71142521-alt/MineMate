@@ -1,0 +1,18 @@
+# 本地配置（保留无秘密的配置模板）
+.env
+.env.*
+!.env.example
+
+# 依赖、npm 缓存、运行日志
+node_modules/
+.npm-cache/
+*.log
+
+# Microsoft 登录缓存含敏感令牌，不得提交
+.auth-cache/
+
+# Python Agent 本地环境与缓存
+agent/.env
+agent/.venv/
+agent/**/__pycache__/
+.pytest_cache/

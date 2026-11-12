@@ -1,0 +1,20 @@
+{
+  "name": "minemate-minecraft-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MineMate 的 Minecraft Java Edition LAN 连接与聊天模块",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "dependencies": {
+    "dotenv": "18.0.10",
+    "mineflayer": "4.39.0",
+    "mineflayer-pathfinder": "2.4.5"
+  }
+}
