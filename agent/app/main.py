@@ -1,18 +1,26 @@
-import os
+import asyncio
+from contextlib import suppress
 from typing import Any, Awaitable, Callable
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .config import load_settings
 from .node_client import NodeApiError, NodeClient
 from .schemas import GotoRequest, MovementRequest
+from .intent import MessageRequest
+from .llm_client import LLMClient, LLMError
+from .message_handler import MessageHandler
+from .tool_client import ToolClient
+from .tool_loop import ToolLoop
 
 
 settings = load_settings()
 app = FastAPI(title="MineMate Agent", version="0.1.0")
 client = NodeClient(settings)
+llm_client = LLMClient(settings)
+message_handler = MessageHandler(settings, llm_client, tool_loop=ToolLoop(settings, llm_client, ToolClient(settings)))
 
 
 def success(data: Any) -> dict[str, Any]:
@@ -43,6 +51,28 @@ async def forward(call: Callable[[], Awaitable[dict[str, Any]]]) -> JSONResponse
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return success({"service": "ok", "node_api": settings.node_api_url})
+
+
+@app.post("/api/agent/message")
+async def agent_message(request: MessageRequest, http_request: Request) -> JSONResponse:
+    work = asyncio.create_task(message_handler.handle(request))
+    try:
+        while not work.done():
+            await asyncio.wait({work}, timeout=0.2)
+            if not work.done() and await http_request.is_disconnected():
+                work.cancel()
+                with suppress(asyncio.CancelledError):
+                    await work
+                return JSONResponse(status_code=499, content=failure("CLIENT_DISCONNECTED", "调用方已断开，已请求取消未完成操作。"))
+        data = await work
+        return JSONResponse(status_code=200, content=success(data))
+    except LLMError as error:
+        return JSONResponse(status_code=error.status_code, content=failure(error.code, error.message))
+    finally:
+        if not work.done():
+            work.cancel()
+            with suppress(asyncio.CancelledError):
+                await work
 
 
 @app.get("/api/game/world")

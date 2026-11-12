@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { parseConfig, DEFAULT_PATHFINDING, DEFAULT_PERCEPTION, DEFAULT_HTTP } = require('../src/config');
 const { createAuthOptions } = require('../src/auth');
+const { DEFAULT_AGENT } = require('../src/agentclient');
 
 const base = { MC_PORT: '51234', BOT_USERNAME: 'MineMate' };
 
@@ -11,7 +12,8 @@ test('默认使用本机和 Microsoft，端口必须来自配置', () => {
     host: '127.0.0.1', port: 51234, username: 'MineMate', auth: 'microsoft', ownerUsername: '',
     pathfinding: DEFAULT_PATHFINDING,
     perception: DEFAULT_PERCEPTION,
-    http: DEFAULT_HTTP
+    http: DEFAULT_HTTP,
+    agent: DEFAULT_AGENT
   });
   assert.equal(parseConfig({ ...base, MC_PORT: '60000' }).port, 60000);
   assert.equal(parseConfig({ ...base, MC_HOST: '192.168.1.8' }).host, '192.168.1.8');
@@ -23,6 +25,17 @@ test('HTTP 服务地址、端口和请求体上限可配置', () => {
   });
   assert.equal(parseConfig({ ...base, HTTP_PORT: '0' }).http.port, 0);
   for (const [name, value] of [['HTTP_PORT', '-1'], ['HTTP_PORT', '65536'], ['HTTP_PORT', 'abc'], ['HTTP_MAX_BODY_BYTES', '0'], ['HTTP_MAX_BODY_BYTES', '1048577']]) {
+    assert.throws(() => parseConfig({ ...base, [name]: value }), new RegExp(name));
+  }
+});
+
+test('Agent 地址、开关、超时和限流参数可配置且拒绝凭据地址', () => {
+  const config = parseConfig({ ...base, AGENT_CHAT_ENABLED: 'false', AGENT_API_URL: 'http://localhost:8001', AGENT_TIMEOUT_MS: '40000' });
+  assert.equal(config.agent.enabled, false);
+  assert.equal(config.agent.url, 'http://localhost:8001');
+  assert.equal(config.agent.timeout, 40000);
+  for (const [name, value] of [['AGENT_API_URL', 'https://secret@example.com'], ['AGENT_API_URL', 'http://localhost?key=secret'],
+    ['AGENT_CHAT_ENABLED', 'maybe'], ['AGENT_TIMEOUT_MS', '0'], ['AGENT_MAX_CONCURRENT', '9'], ['AGENT_REQUESTS_PER_MINUTE', '121'], ['AGENT_PLAYER_COOLDOWN_MS', '0']]) {
     assert.throws(() => parseConfig({ ...base, [name]: value }), new RegExp(name));
   }
 });

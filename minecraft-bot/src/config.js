@@ -1,5 +1,6 @@
 const path = require('node:path');
 const dotenv = require('dotenv');
+const { DEFAULT_AGENT } = require('./agentclient');
 
 const DEFAULT_PATHFINDING = Object.freeze({ maxDistance: 256, searchRadius: 256, thinkTimeout: 5000 });
 const DEFAULT_PERCEPTION = Object.freeze({
@@ -75,7 +76,22 @@ function parseConfig(env) {
     maxBodyBytes: readPositiveInteger(env, 'HTTP_MAX_BODY_BYTES', DEFAULT_HTTP.maxBodyBytes, 1024 * 1024)
   };
 
-  return { host, port: Number(portText), username, auth, ownerUsername, pathfinding, perception, http };
+  const enabled = (env.AGENT_CHAT_ENABLED ?? 'true').trim().toLowerCase();
+  if (!['true', 'false'].includes(enabled)) throw new Error('AGENT_CHAT_ENABLED 必须是 true 或 false。');
+  let agentUrl;
+  try {
+    agentUrl = new URL(env.AGENT_API_URL ?? DEFAULT_AGENT.url);
+    if (!['http:', 'https:'].includes(agentUrl.protocol) || agentUrl.username || agentUrl.password || agentUrl.search || agentUrl.hash || agentUrl.pathname !== '/') throw new Error();
+  } catch { throw new Error('AGENT_API_URL 必须是无凭据的 HTTP 服务地址。'); }
+  const agent = {
+    enabled: enabled === 'true', url: agentUrl.origin,
+    timeout: readPositiveInteger(env, 'AGENT_TIMEOUT_MS', DEFAULT_AGENT.timeout, 150000),
+    maxConcurrent: readPositiveInteger(env, 'AGENT_MAX_CONCURRENT', DEFAULT_AGENT.maxConcurrent, 8),
+    requestsPerMinute: readPositiveInteger(env, 'AGENT_REQUESTS_PER_MINUTE', DEFAULT_AGENT.requestsPerMinute, 120),
+    playerCooldown: readPositiveInteger(env, 'AGENT_PLAYER_COOLDOWN_MS', DEFAULT_AGENT.playerCooldown, 60000)
+  };
+
+  return { host, port: Number(portText), username, auth, ownerUsername, pathfinding, perception, http, agent };
 }
 
 function loadConfig() {

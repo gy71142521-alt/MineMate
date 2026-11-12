@@ -1,5 +1,6 @@
-function registerChatEvents(bot, logger = console, movement, perception) {
+function registerChatEvents(bot, logger = console, movement, perception, agent) {
   let ready = false;
+  let generation = 0;
 
   function send(message) {
     try {
@@ -106,7 +107,11 @@ function registerChatEvents(bot, logger = console, movement, perception) {
     ready = true;
     send('大家好，我是 MineMate！发送“你好”或“状态”可以和我互动。');
   });
-  bot.on('end', () => { ready = false; });
+  bot.on('end', () => { ready = false; generation += 1; });
+  bot.on('kicked', () => { ready = false; generation += 1; });
+  // 丢弃死亡或换维度前仍在云端处理的旧回复。
+  bot.on('death', () => { generation += 1; });
+  bot.on('respawn', () => { generation += 1; });
 
   // 异步到达/失败统一反馈，监听器在注册聊天时添加一次，不随指令累积。
   function onMovementResult(result) {
@@ -117,7 +122,10 @@ function registerChatEvents(bot, logger = console, movement, perception) {
 
   bot.on('chat', (username, message) => {
     if (username === bot.username) return;
-    logger.log(`[Chat] ${username}: ${message}`);
+    const logMessage = message.replace(/\bsk-[A-Za-z0-9_-]+/gu, '[已隐藏]')
+      .replace(/((?:api[_-]?key|access[_-]?token|password)\s*[:=]\s*)\S+/giu, '$1[已隐藏]')
+      .replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 500);
+    logger.log(`[Chat] ${username}: ${logMessage}`);
     if (!ready) return;
 
     const command = message.trim();
@@ -137,6 +145,8 @@ function registerChatEvents(bot, logger = console, movement, perception) {
         return;
       }
       try {
+        if (command === '停止') generation += 1;
+        agent?.cancel?.(username);
         let result;
         if (command === '停止') {
           result = movement.stop(username);
@@ -150,6 +160,7 @@ function registerChatEvents(bot, logger = console, movement, perception) {
           }
           result = movement.goTo(username, ...parts.slice(1).map(Number));
         }
+        if (result?.ok && command !== '停止') generation += 1;
         send(result.message);
       } catch {
         // 意外错误也先释放当前任务，避免异常后仍继续主动移动。
@@ -157,6 +168,17 @@ function registerChatEvents(bot, logger = console, movement, perception) {
         logger.error('[Movement] 处理移动指令失败。');
         send('处理移动指令失败，请检查终端日志。');
       }
+    } else if (agent && command) {
+      const currentGeneration = generation;
+      const toolGeneration = bot.tools?.getState().generation;
+      const requestArguments = Number.isInteger(toolGeneration) ? [username, command, { generation: toolGeneration }] : [username, command];
+      // 不等待网络；旧指令不会进入此分支，返回 intent 也不会传给移动模块。
+      Promise.resolve().then(() => ready && currentGeneration === generation ? agent.message(...requestArguments) : null).then((result) => {
+        if (ready && currentGeneration === generation && result?.reply) send(result.reply);
+      }).catch(() => {
+        logger.error('[Agent] 聊天处理失败。');
+        if (ready && currentGeneration === generation) send('自然语言服务暂不可用；旧指令仍可使用。');
+      });
     }
   });
 }

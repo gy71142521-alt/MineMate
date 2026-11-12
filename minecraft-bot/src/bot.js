@@ -1,8 +1,10 @@
 const mineflayer = require('mineflayer');
 const { createAuthOptions } = require('./auth');
 const { registerChatEvents } = require('./events/chat');
-const { createMovementController } = require('./movement');
-const { createPerception } = require('./perception');
+const { createMovementController } = require('./tools/movement');
+const { createPerception } = require('./tools/perception');
+const { createToolSystem } = require('./tools');
+const { createAgentClient } = require('./agentclient');
 
 function describeError(error, auth) {
   // 只用原始错误做分类，不输出可能包含令牌的认证响应、请求头或堆栈。
@@ -35,7 +37,7 @@ function formatReason(reason) {
     .replace(/((?:access[_-]?token|refresh[_-]?token|client[_-]?token|password|api[_-]?key)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, '$1[已隐藏]');
 }
 
-function startBot(config, { createBot = mineflayer.createBot, createMovement = createMovementController, createPerceptionModule = createPerception, logger = console, onFailure = () => {} } = {}) {
+function startBot(config, { createBot = mineflayer.createBot, createMovement = createMovementController, createPerceptionModule = createPerception, createAgent = createAgentClient, logger = console, onFailure = () => {} } = {}) {
   logger.log(`[MineMate] 正在连接服务器 ${config.host}:${config.port}（认证：${config.auth}）...`);
   const options = {
     host: config.host,
@@ -101,7 +103,12 @@ function startBot(config, { createBot = mineflayer.createBot, createMovement = c
   } catch {
     logger.error('[Perception] 感知模块初始化失败，查询将提示暂不可用。');
   }
-  registerChatEvents(bot, logger, movement, perception);
+  bot.tools = createToolSystem(bot, { movement, perception, ownerUsername: config.ownerUsername, logger });
+  bot.tools.guardMovement();
+  const agent = config.agent?.enabled ? createAgent(config.agent, { logger }) : undefined;
+  bot.once('end', () => agent?.dispose());
+  bot.once('kicked', () => agent?.dispose());
+  registerChatEvents(bot, logger, movement, perception, agent);
   return bot;
 }
 

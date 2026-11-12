@@ -1,0 +1,26 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
+const { createApiServer } = require('../src/httpServer');
+const { createToolSystem } = require('../src/tools');
+test('真实 HTTP 公开同一注册目录、执行白名单、拦截停止后的旧请求', async (t) => {
+  const bot = new EventEmitter();
+  bot.entity = {};
+  bot.mineMateStatus = () => ({ connected: true, spawned: true });
+  const movement = { follow: () => ({ ok: true }), stop: () => ({ ok: true }) };
+  bot.tools = createToolSystem(bot, { movement, perception: { getPlayerState: () => ({ health: 20 }) }, logger: { log() {}, error() {} } });
+  bot.tools.guardMovement(); bot.emit('spawn');
+  const server = createApiServer({ bot, movement });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { bot.emit('end'); server.closeAllConnections(); return new Promise((resolve) => server.close(resolve)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const catalog = (await (await fetch(`${base}/api/tools`)).json()).data;
+  assert.deepEqual(catalog.tools, bot.tools.list());
+  const send = async (body) => fetch(`${base}/api/tools/execute`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const payload = { username: 'Steve', tool: 'query_status', arguments: {}, requestId: 'r1', generation: catalog.generation };
+  assert.equal((await (await send(payload)).json()).data.data.health, 20);
+  assert.equal((await (await send({ ...payload, tool: 'shell', requestId: 'r2' })).json()).data.error.code, 'UNKNOWN_TOOL');
+  movement.stop('Steve');
+  assert.equal((await send({ ...payload, requestId: 'r3' })).status, 409);
+  assert.equal((await send({ ...payload, generation: '0' })).status, 400);
+});

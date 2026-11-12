@@ -89,7 +89,7 @@ function isBotReady(bot, status) {
   return Boolean(status?.connected && status?.spawned && bot?.entity && bot.isAlive !== false);
 }
 
-function createApiServer({ bot, movement, perception, getStatus, logger = console, maxBodyBytes = DEFAULT_MAX_BODY_BYTES } = {}) {
+function createApiServer({ bot, movement, perception, tools = bot?.tools, getStatus, logger = console, maxBodyBytes = DEFAULT_MAX_BODY_BYTES } = {}) {
   return http.createServer(async (request, response) => {
     const method = request.method ?? 'GET';
     const url = new URL(request.url ?? '/', 'http://localhost');
@@ -113,6 +113,39 @@ function createApiServer({ bot, movement, perception, getStatus, logger = consol
           return;
         }
         sendJson(response, 200, envelope(true, snapshot));
+        return;
+      }
+
+      if (method === 'GET' && url.pathname === '/api/tools') {
+        sendJson(response, tools ? 200 : 503, tools ? envelope(true, { tools: tools.list(), generation: tools.getState().generation }) : errorBody('TOOLS_UNAVAILABLE', '工具系统尚未就绪。'));
+        return;
+      }
+      if (method === 'POST' && ['/api/tools/execute', '/api/tools/cancel'].includes(url.pathname)) {
+        if (!tools) { sendJson(response, 503, errorBody('TOOLS_UNAVAILABLE', '工具系统尚未就绪。')); return; }
+        if (!/^application\/json(?:\s*;|$)/i.test(request.headers['content-type'] ?? '')) {
+          sendJson(response, 415, errorBody('UNSUPPORTED_MEDIA_TYPE', '请求必须使用 application/json。')); return;
+        }
+        let body;
+        try { body = await readJson(request, maxBodyBytes); }
+        catch (error) { sendJson(response, error.code === 'BODY_TOO_LARGE' ? 413 : 400, errorBody(error.code === 'BODY_TOO_LARGE' ? 'BODY_TOO_LARGE' : 'INVALID_JSON', '请求体过大或 JSON 无效。')); return; }
+        const cancelling = url.pathname.endsWith('/cancel');
+        if (!hasOnlyKeys(body, cancelling ? ['username', 'requestId'] : ['username', 'tool', 'arguments', 'requestId', 'generation']) || !validUsername(body.username) ||
+          (cancelling && body.requestId !== undefined && (typeof body.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(body.requestId))) ||
+          (!cancelling && (typeof body.tool !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(body.tool) || typeof body.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(body.requestId) || !Number.isInteger(body.generation)))) {
+          sendJson(response, 400, errorBody('INVALID_ARGUMENT', '工具请求格式无效。')); return;
+        }
+        if (cancelling) {
+          const ok = tools.cancel(body.username, false, body.requestId);
+          if (ok && !body.requestId) movement?.stop(body.username);
+          sendJson(response, ok ? 200 : 403, ok ? envelope(true, { status: 'cancelled' }) : errorBody('FORBIDDEN', '无权取消操作。'));
+          return;
+        }
+        if (body.generation !== tools.getState().generation) {
+          sendJson(response, 409, errorBody('STALE_TASK', '任务已被停止或生命周期变化取消。')); return;
+        }
+        // 工具失败属于真实执行结果，保持 HTTP 200 和完整工具信封，供模型读取。
+        const result = await tools.execute(body.tool, body.arguments, body.username, body.requestId);
+        sendJson(response, 200, envelope(true, result));
         return;
       }
 

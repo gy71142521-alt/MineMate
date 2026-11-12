@@ -101,3 +101,14 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 6. 更新必要的开发文档。
 
 禁止声称执行了实际上没有执行的测试。
+
+## 9. 统一游戏工具开发规范（Task 006）
+
+- 游戏实现统一放在 `minecraft-bot/src/tools/`，按 movement、perception、mining、building、combat、inventory、interaction、crafting 分类。
+- `tools/index.js` 组装工具，`tools/registry.js` 统一注册、校验、调度、去重、超时和取消。新工具必须注册后才能由 Agent 调用。
+- 旧 `src/movement.js` 与 `src/perception/` 仅保留转发导出，保持旧接口兼容，禁止放置第二份游戏逻辑。
+- Node 的注册定义是工具名称、描述和参数 Schema 的唯一来源；Python 通过 HTTP 获取，不另行维护游戏工具清单。
+- 工具返回 `{ success, tool, data, error }`；`data.status` 区分 completed、pending、uncertain。未确认结果不得报告成功。
+- 游戏修改工具互斥，停止优先取消；超时后等待底层调用结算再释放锁。每次异步步骤前后检查取消与连接状态。
+- 功能方块使用独立适配器，窗口在结束、异常、取消时清理。持续操作必须有界，失败不得自动无限重试。
+- 修改工具时运行全部旧测试及相关新增测试，并分别报告自动化结果与真实游戏验证状态。
