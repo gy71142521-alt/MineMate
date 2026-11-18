@@ -20,7 +20,7 @@ function inspect(ctx, a) {
   return { reference, direction };
 }
 function registerBuilding(registry) {
-  registry.register({ name: 'inspect_placement', description: '只读检查单个方块位置、支撑面与实体碰撞，不放置。', parameters, mutates: false,
+  registry.register({ name: 'inspect_placement', description: '仅用于建造/放置前检查空位置、支撑面与碰撞；不是挖掘或查询已有方块的工具，查已有方块用 inspect_block。', parameters, mutates: false,
     execute(ctx, a) { inspect(ctx, a); return state('completed', { placeable: true, position: a.position }); } });
   registry.register({ name: 'place_block', description: '在明确坐标放置单个方块，不能覆盖方块或实体。', parameters,
     async execute(ctx, a) {

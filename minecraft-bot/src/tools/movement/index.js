@@ -1,6 +1,7 @@
 const { EventEmitter } = require('node:events');
 const { pathfinder, Movements, goals: { GoalFollow, GoalNear } } = require('mineflayer-pathfinder');
 const { DEFAULT_PATHFINDING } = require('../../config');
+const { createMotionControls } = require('./controls');
 
 const LIMITS = Object.freeze({
   followRange: 3,
@@ -57,7 +58,12 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
     }
     try {
       // 连接尚未完成时，Mineflayer 的物理插件可能还未注入。
-      if (typeof bot.clearControlStates === 'function') bot.clearControlStates();
+      try {
+        if (typeof bot.clearControlStates === 'function') bot.clearControlStates();
+      } finally {
+        // 4.39.0 的 clearControlStates 不清理起跳队列；取消目标时一并取消尚未发生的起跳。
+        if ('jumpQueued' in bot) bot.jumpQueued = false;
+      }
     } catch {
       ok = false;
       logger.error('[Movement] 释放移动控制失败。');
@@ -73,14 +79,25 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
     return previous;
   }
 
-  function cancel() {
+  function cancel(preserveModes = false) {
     forgetTask();
-    return releaseControls();
+    let ok = true;
+    try { controls.reset(preserveModes); }
+    catch { ok = false; logger.error('[Movement] 清理移动模式失败。'); }
+    const released = releaseControls();
+    try { controls.configure(); if (preserveModes && released && ok) controls.applyModes(); }
+    catch { ok = false; logger.error('[Movement] 恢复寻路速度配置失败。'); }
+    if (!released || !ok) {
+      // 清理失败不能恢复持续模式；尽最大可能释放剩余按键。
+      try { controls.reset(); controls.configure(); bot.clearControlStates?.(); }
+      catch { logger.error('[Movement] 移动控制未能完全释放，请检查 Bot 状态。'); }
+    }
+    return released && ok;
   }
 
   function finish(current, ok, status, message) {
     if (!isCurrent(current)) return;
-    if (!cancel()) {
+    if (!cancel(ok)) {
       ok = false;
       status = 'failed';
       message = '移动任务已结束，但清理寻路控制失败，请检查终端日志。';
@@ -144,7 +161,7 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
   }
 
   function start(username, type, goal, extra, message) {
-    if (!cancel()) return result(false, 'failed', '无法取消原移动目标，请检查终端日志。', username);
+    if (!cancel(true)) return result(false, 'failed', '无法取消原移动目标，请检查终端日志。', username);
     const current = {
       taskId: ++nextTaskId,
       username, type, goal, ...extra,
@@ -154,6 +171,7 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
     task = current;
     try {
       bot.pathfinder.setGoal(goal, type === 'follow');
+      controls.applyModes();
       current.timer = setInterval(() => watch(current), LIMITS.checkInterval);
       current.timer.unref();
       logger.log(`[Movement] ${message}`);
@@ -210,12 +228,21 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
     return result(ok, ok ? 'stopped' : 'failed', ok ? '已停止移动' : '停止移动时发生错误，请检查终端日志。', username, taskId);
   }
 
+  function setMode(username, name, enabled) {
+    const denied = checkAccess(username);
+    if (denied) return denied;
+    if (typeof enabled !== 'boolean') return result(false, 'invalid', '移动模式 enabled 必须为布尔值。', username);
+    const motion = controls.setMode(name, enabled);
+    return { ...result(!!motion, motion ? 'mode_changed' : 'failed', motion ? '移动模式已更新。' : '移动模式设置失败。', username), motion };
+  }
+
   function initialize() {
     if (disposed) return;
     ready = false;
     if (!cancel()) return;
     try {
       bot.pathfinder.setMovements(createSafeMovements(bot));
+      controls.configure();
       bot.pathfinder.thinkTimeout = options.thinkTimeout;
       bot.pathfinder.searchRadius = options.searchRadius;
       ready = true;
@@ -246,6 +273,8 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
   function onGoalUpdated(goal) {
     if (!task || task.goal === goal) return;
     const previous = forgetTask();
+    try { controls.reset(); bot.clearControlStates(); controls.configure(); }
+    catch { logger.error('[Movement] 外部目标替换后清理移动模式失败。'); }
     logger.log('[Movement] 原移动目标已被其他操作替换');
     controller.emit('result', result(false, 'cancelled', '原移动目标已被其他操作替换。', previous.username, previous.taskId));
   }
@@ -286,15 +315,27 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
     disposed = true;
     ready = false;
     cancel();
+    controls.dispose();
     for (const [event, handler] of Object.entries(listeners)) bot.removeListener(event, handler);
     controller.removeAllListeners();
   }
 
   Object.assign(controller, {
     follow, goTo, stop, dispose,
+    setSprint: (username, enabled) => setMode(username, 'sprint', enabled),
+    setSneak: (username, enabled) => setMode(username, 'sneak', enabled),
+    jump: (username, { signal } = {}) => {
+      const denied = checkAccess(username);
+      return denied ? Promise.resolve(denied) : controls.startJump(username, signal);
+    },
+    getMotionState: () => controls.state(),
     getState: () => ({ type: task?.type ?? 'idle', username: task?.username ?? null, taskId: task?.taskId ?? null })
   });
   bot.loadPlugin(pathfinder);
+  const controls = createMotionControls(bot, {
+    isReady: () => ready && !disposed && validPosition(bot.entity?.position), logger,
+    fail: (message) => { if (task) finish(task, false, 'failed', message); else cancel(); }
+  });
   for (const [event, handler] of Object.entries(listeners)) bot.on(event, handler);
   return controller;
 }

@@ -51,7 +51,7 @@
 
 | 文件 | 职责或修改 |
 | --- | --- |
-| `minecraft-bot/src/tools/index.js` | 26 个工具的唯一注册组装入口 |
+| `minecraft-bot/src/tools/index.js` | 统一注册组装入口，首次交付 26 个工具，补充 inspect_block 后为 27 个 |
 | `minecraft-bot/src/tools/registry.js` | 白名单、权限、互斥、超时、取消、请求去重、任务代数 |
 | `minecraft-bot/src/tools/schema.js` | 双端可验证的有限 JSON Schema 定义 |
 | `minecraft-bot/src/tools/common.js` | 距离/方块/背包/耐久检查、结果与错误 |
@@ -110,7 +110,7 @@
 
 ## 启动、接口和游戏验收
 
-完整启动命令（逐条）、环境变量、26 个工具及参数、HTTP 请求/响应示例、游戏内 12 项验收清单见 [README 的 Task 006 小节](../../minecraft-bot/README.md#task-006统一游戏工具与-tool-calling)。
+完整启动命令（逐条）、环境变量、当前 27 个工具及参数、HTTP 请求/响应示例、游戏内 12 项验收清单见 [README 的 Task 006 小节](../../minecraft-bot/README.md#task-006统一游戏工具与-tool-calling)。
 
 - Python：在 `agent` 中执行 `.\.venv\Scripts\python.exe -m app.main`。
 - Node：在 `minecraft-bot` 中执行 `npm.cmd start`，并配置当前 LAN 端口和正常认证。
@@ -124,7 +124,7 @@
 
 1. 当前供应商的工具协议请求被拒绝，需要核实其 Chat Completions function tools 参数支持或选择明确兼容的接口/模型；不会绕过参数验证执行普通文本。
 2. 未执行 Minecraft 实测，不同游戏版本、模组、自定义配方、时延和其他玩家同时修改环境仍需验证；结果不明时返回 uncertain/pending。
-3. 基础熔炼、丢弃、道具使用和敌对实体采用保守白名单。酿造、附魔、铁砧、砂轮、高炉、烟熏炉等未实现，预留独立适配器扩展。
+3. 基础熔炼、道具使用和敌对实体采用保守白名单；丢弃物品白名单已按用户后续要求移除，见本文最后的变更记录。酿造、附魔、铁砧、砂轮、高炉、烟熏炉等未实现，预留独立适配器扩展。
 4. 跟随/导航异步启动不表示到达；熔炉加工在世界中继续，停止不能撤销已经投入、消耗或生效的操作。底层 API 挂起时会保留锁，可能需要重新连接。
 5. HTTP 面向本机和可信 LAN，无互联网身份认证；requestId 去重是内存中有限保留，不是跨进程持久化保证。
 6. 下一阶段先完成真实工具验收，再引入任务 ID、子任务状态和有界重试；失败/取消后先重新读取状态，再决定下一步，避免重复破坏或存取。
@@ -159,3 +159,115 @@
 修改 `agent/app/tool_loop.py`、`agent/test/{test_tool_loop,test_tool_probe}.py`、README 和本文，手动探测与正常消息共用同一解析模型。真实配置、Node 游戏逻辑和工具权限未改动。
 
 实际完整回归：**Node 118/118、Python 54/54 通过**，Python 编译检查通过。新增测试验证兼容格式的执行/结果回传、ID 原样关联、index 不回传、非法字段诊断不泄密、参数与白名单限制不变。真实跟随仍需重启 Python 后在游戏中验证；若未解决，新日志会标出被拒绝的具体字段类别。
+
+## 2026-11-16：食用、丢弃、导航后交互及挖掘工具选择修正
+
+用户游戏日志提供了以下证据；本次未把这些日志当作修正后的实机验证：
+
+| 现象 | 已确认原因 | 修改 |
+| --- | --- | --- |
+| 附魔金苹果返回 CANNOT_CONSUME | 业务层将所有 food 都限定为饥饿值小于 20，漏掉原版例外 | 允许满饥饿食用 golden_apple / enchanted_golden_apple；与已安装 Mineflayer inventory.js 的消费例外核对，普通食物仍检查饥饿 |
+| 攻击请求只导航 | goto_position 启动即返回 pending，Python 对 pending 终止本轮，未执行攻击 | 工具导航默认最多等待 15 秒，按当前 taskId 的真实 arrived 事件返回 completed 后，原有工具循环可继续；未到达仍 pending |
+| 挖掘却调用 inspect_placement 并报 OCCUPIED | 模型选了放置工具；已有方块在放置检查中确实应被拒绝，且缺少任意单点方块查询 | 添加只读 inspect_block；说明放置检查与挖掘的差异；mine_block 加可选 tool_name，按玩家指定工具检查、装备和挖掘 |
+| 丢弃橡木木板返回 PROTECTED_ITEM | 木板未包含在原低价值白名单 | 加入原版各种木板，保持 1–16 数量、重要物品保护和禁止清空整个背包 |
+
+导航等待封装在 `tools/movement/navigation.js`，复用原 `movement/index.js` 与真实 result 事件，不重写 Task 002、不创建第二个目标。`goto_position.wait_seconds` 为 0–15，默认 15；0 为即时返回模式。等待期间仍可最高优先级停止，取消只针对当前 taskId，路径失败、断线或状态读取异常会结算等待并清理监听/定时器。注册表绑定原控制器的事件方法，避免包装对象产生另一套事件状态。旧聊天“前往”和 Task 004 `/api/movement/goto` 保留原来的即时返回行为。
+
+Agent 提示词明确：攻击必须使用真实实体 ID，attack_entity 的 weapon 可直接装备；导航到达不是攻击完成；读取待挖方块使用 inspect_block 而非 inspect_placement。工具失败的最终回复按程序定义的错误分类提供具体原因，不回显上游原文，不把失败改写成成功。这仍是真实 Tool Calling，没有添加字符串匹配执行路由或长期规划。
+
+修改文件：
+
+- Node：`src/tools/{index,registry}.js`、`src/tools/inventory/index.js`、`src/tools/mining/index.js`、`src/tools/building/index.js`；新增 `src/tools/movement/navigation.js`。
+- Python：`agent/app/tool_loop.py`。
+- 测试：`minecraft-bot/test/{toolactions,movement}.test.js`、`agent/test/test_tool_loop.py`。
+- 文档：README 与本文；真实配置、认证缓存和依赖未修改。
+
+实际最终检查：**Node 126/126、Python 57/57 通过**，48 个 JavaScript 文件语法检查、Python 编译检查和 `git diff --check` 通过。没有跳过原有测试或改变原有测试断言；补充测试覆盖：
+
+- 满饥饿食用两类金苹果、普通食物仍拒绝、实际数量未变时 uncertain。
+- 丢弃 4 个橡木木板、实际数量变化，以及超量/钻石/清空背包仍拒绝。
+- 单点查询只读，钻石斧装备、缺失/不合适工具拒绝，原挖掘保护仍保留。
+- 导航等待真实到达、忽略旧任务 ID、有界 pending、取消/路径失败/断线/读取异常清理。
+- 工具注册表与原 Task 002 控制器的到达事件整合、监听恢复与 canDig=false。
+- Mock 模型在导航 completed 后同轮继续 attack_entity，在 inspect_block 后传 tool_name 挖掘，以及失败回复不泄露原始错误。
+
+未进行新的付费模型请求或 Minecraft 实测。Mock 能验证程序控制链路，不能证明真实模型一定选对工具。需要重启 Node 与 Python，在游戏中复测用户原来的四条指令；导航超过 15 秒仍会结束本轮，移动继续由原控制器管理，不会无限等待或自动追击。未知物品/模组食物、重要物品丢弃、隔墙挖掘等原保护与限制保持。
+
+## 2026-11-16：按用户要求移除丢弃物品的价值限制
+
+本节覆盖前文阶段记录中的丢弃白名单与禁止丢完背包规则。用户明确要求工具开发阶段不判断贵重程度，物品价值偏好由后续记忆/学习层考虑。
+
+- 移除 `DROPPABLE` 白名单和 `PROTECTED_ITEM` 拒绝；任意实际背包物品均可按名称和数量丢弃，包括钻石、附魔装备和附魔金苹果。
+- 移除 `EMPTY_INVENTORY_FORBIDDEN` 限制，明确指定的物品即使是背包最后一件也可丢出；仍没有自动清空其他物品的批量接口。
+- 保留单次 1–16 个整数、物品存在/数量充足、原主人权限、互斥/取消与实际数量变化验证；数量未变化返回 uncertain。
+- Agent 提示词同步移除“不丢弃重要物品”，不要求按价值额外确认；名称或数量缺失时仍先澄清。
+- 同步更新 AGENTS.md、任务规范和 README，避免未来重新引入价值白名单。旧测试中针对白名单及最后一件物品的断言按新的明确需求更新，其他功能断言保留。
+
+修改：`minecraft-bot/src/tools/inventory/index.js`、`agent/app/tool_loop.py`、两端对应工具测试、AGENTS.md、README、任务规范及本文。
+
+实际完整回归：**Node 126/126、Python 57/57 通过**。测试覆盖钻石、附魔装备、木板、丢完最后物品，以及数量为零/负数/小数/字符串/超上限、数量不足、不存在物品和执行未确认的情形。没有付费模型请求或游戏内实测。需要重启 Node 和 Python 后在游戏中验收。
+
+## 2026-11-16：Movement 跑步、潜行与单次跳跃扩展
+
+本次在原移动控制器上增加状态管理和物理帧协作，不重写 Task 002 的 GoalFollow、GoalNear、看门狗或导航等待，也没有新增依赖、Bot 实例或独立方向控制循环。
+
+### 修改文件与职责
+
+| 文件 | 变更 |
+| --- | --- |
+| `minecraft-bot/src/tools/movement/controls.js`（新增） | 管理跑步/潜行模式、优先级与恢复；有界单次跳跃；协调 pathfinder 物理帧按键及清理 |
+| `minecraft-bot/src/tools/movement/tools.js`（新增） | 注册 set_sprint、set_sneak、jump 和各自参数 Schema |
+| `minecraft-bot/src/tools/movement/index.js` | 原控制器接入模式/跳跃；保持旧接口和 getState 结构；增加 getMotionState；停止及生命周期统一清理 |
+| `minecraft-bot/src/tools/index.js` | 组装三项新工具，现为 30 个注册工具；标记跟随/导航可接受同步模式调整 |
+| `minecraft-bot/src/tools/registry.js` | 导航等待期间允许同步模式设置，保留导航锁、taskId 和取消归属；跳跃仍为互斥异步动作 |
+| `minecraft-bot/src/tools/schema.js` | 通用严格布尔参数校验，不将字符串或数字当作布尔值 |
+| `agent/app/tool_client.py` | 通用布尔 Schema/参数校验；继续从实际 Node 目录获取定义 |
+| `agent/app/tool_loop.py` | 告知模型模式组合方式；跳跃失败使用程序定义提示，不回显内部错误 |
+| `minecraft-bot/test/movement.test.js` | 新增模式、跳跃、取消、超时、互斥及实际插件/物理模拟集成覆盖 |
+| `agent/test/test_tool_loop.py` | 模式→跟随串行调用、布尔严格校验，以及真实 Node 注册目录契约校验 |
+| `AGENTS.md`、`minecraft-bot/README.md`、`docs/tasks/task006.md`、本文 | 记录开发规范、真实行为、30 个工具、调用示例及手动验收 |
+
+旧转发模块、聊天命令、感知实现、原移动 HTTP 路由和真实配置均未改动。本节只记录本次移动扩展；工作区此前已有的导航等待、物品丢弃等修改保留。
+
+### 接口和行为
+
+新增工具通过原 `POST /api/tools/execute` 调用，仍使用 `{success,tool,data,error}` 工具信封，外层 HTTP 信封保持原样：
+
+- `set_sprint({enabled:true|false})`：配置 pathfinder 是否允许安全路段跑步，返回 completed 和 motion 状态；不会自行向前走。
+- `set_sneak({enabled:true|false})`：配置持续潜行，期间关闭有效跑步；关闭潜行恢复原先跑步设置。
+- `jump({})`：仅地面/非液体状态发出单帧起跳脉冲，观察离地并落地才 completed；3 秒内不能确认则失败并停止移动。
+
+`getMotionState()` 返回 `{sprint:null|boolean,sneak:boolean,jumping:boolean,allowSprinting:boolean}`。默认 sprint=null 延续原 pathfinder 自动速度选择，显式 false 禁止跑步。停止等清理操作恢复此默认值并释放按键；不代表下一次新导航也永远禁止跑步。
+
+同一控制器的目标替换与正常到达保留持续模式；停止、取消、路径失败、看门狗超时、目标丢失、死亡、重生、维度切换及断线清理。同步模式设置可在有限导航等待中执行，不替换 active 工具或 pendingMovement。跳跃不创建新目标，并保留后台跟随/导航的请求取消归属；其它异步修改工具依然互斥。
+
+已核对本机安装的 Mineflayer 4.39.0 官方文档及 physics.js、pathfinder 2.4.5 的 index.js / movements.js。使用实际 setControlState、getControlState、clearControlStates、physicsTick、allowSprinting 和 setMovements 接口。物理帧前后钩子只注册一次：释放上一帧手动脉冲→pathfinder 更新→施加模式/本次脉冲。在释放本模块手动脉冲或取消整个移动目标时补清理 Mineflayer 起跳队列 jumpQueued，避免停止后延迟起跳；升级依赖必须复查此版本细节。
+
+### 实际自动化结果
+
+- `npm.cmd test`：**Node 138/138 通过，失败/取消/跳过均为 0**，含全部原有测试。
+- `.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s test -v`（agent 目录）：**Python 59/59 通过**，含全部原有测试。
+- 50 个 JavaScript 文件 `node --check` 通过；Python `compileall` 通过。
+- 当前 Python 虚拟环境实际为 **3.14.10**，没有声称在规范要求的 3.12 上验证；Node 依赖和 Python 依赖均未新增。
+
+新增自动化验证了持续模式开关、潜行优先/恢复、权限与就绪、严格布尔参数、目标替换及旧回调、单次脉冲/落地确认、跳跃有界、停止与队列清理、AbortSignal、工具超时、死亡/断线、锁与监听器清理、导航等待时切换模式，以及 Python 使用实际 Node Schema。
+
+三项新增集成测试使用实际 pathfinder A*、prismarine-physics 与有限内存地形，验证步行/跑步/潜行速度差异、潜行导航到达、单次跳跃起落、注册工具与控制器协作，以及移动中的跟随叠加跳跃、玩家改变方向后继续寻路。它们不连接真实 Minecraft，也没有调用付费模型；不能替代游戏内验收。
+
+### 启动和 Minecraft 验收
+
+重启 Node 和 Python 即生效，无需新增环境变量或安装依赖。保持正确的 LAN 端口；自然语言需要原有 `TOOL_CALLING_ENABLED=true` 和支持 function tools 的模型。启动命令及可绕过模型直接验证工具的 PowerShell 示例见 README“跑步、潜行与跳跃”“配置与启动”。
+
+请在平坦、可控区域按以下顺序手动验证并记录结果：
+
+1. 回归“你好”“状态”“背包”“附近”“环境”“跟随我”“前往 X Y Z”“停止”和原 HTTP 接口；确认寻路不挖掘或放置方块。
+2. 检查 GET /api/tools 包含 30 个无重名工具，新模式参数为 boolean。自然语言“开启跑步，然后跟着我”，确认日志先 set_sprint 再 follow_player，Bot 仍保持跟随距离；禁止跑步后观察平地速度变化。
+3. 跟随途中开启潜行，观察姿态与减速；关闭潜行后确认跟随继续、原跑步设置恢复。分别测试原先允许和禁止跑步两种情况。
+4. “潜行前往”附近安全坐标，确认模式保留且最终到达；切换跟随/导航不创建双重目标。正常到达仍潜行，显式关闭可恢复站立。
+5. 站立时和后台跟随/导航期间“跳一下”，确认只主动跳一次，实际落地后才回复完成；玩家改变方向后继续跟随。头顶受阻时应在 3 秒内反馈不能确认并停止，不能无限起跳。
+6. 跳跃或移动期间输入旧指令“停止”，确认目标、跑步/潜行和手动跳跃脉冲被清理；之后不再重复起跳或恢复潜行。停止不会撤销已经发生的腾空惯性，Bot 会继续受游戏物理作用直到落地。
+7. 在测试世界验证死亡/重生、换维度、失去跟随目标和断线后的清理；重新进入并发新指令时不继承旧显式模式。验证超时/无路不会无限重试。
+
+### 已知限制
+
+尚未进行本次 Minecraft 或真实模型测试，不能标记游戏验收完成。模型可能选错工具，可使用 README 的直接工具调用区分选择问题与执行问题。同步模式设置可与导航等待组合；jump 仍不能插入另一个尚未返回的异步工具（BUSY），需等返回 pending/completed，或以 wait_seconds=0 启动后台导航。路径安全判断、饥饿和服务端规则决定能否实际跑步；潜行较慢，原坐标任务 60 秒和无进展 15 秒限制保留。不会自动游泳跳跃、连跳或调整任务时限。

@@ -12,6 +12,7 @@ node_modules/
 .auth-cache/
 
 # Python Agent 本地环境与缓存
+__pycache__/
 agent/.env
 agent/.venv/
 agent/**/__pycache__/

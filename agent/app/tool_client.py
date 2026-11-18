@@ -15,6 +15,8 @@ def validate(schema: dict, value: Any) -> bool:
     if "enum" in schema and value not in schema["enum"]:
         return False
     kind = schema.get("type")
+    if kind == "boolean":
+        return type(value) is bool
     if kind == "object":
         return isinstance(value, dict) and all(key in value for key in schema["required"]) and all(
             key in schema["properties"] and validate(schema["properties"][key], item) for key, item in value.items())
@@ -29,6 +31,8 @@ def validate_schema(schema: Any, depth: int = 0) -> bool:
     if depth > 6 or not isinstance(schema, dict):
         return False
     kind = schema.get("type")
+    if kind == "boolean":
+        return True
     if kind == "object":
         properties, required = schema.get("properties"), schema.get("required")
         return isinstance(properties, dict) and len(properties) <= 20 and isinstance(required, list) and schema.get("additionalProperties") is False and all(

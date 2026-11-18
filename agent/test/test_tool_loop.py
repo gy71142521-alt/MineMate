@@ -13,7 +13,7 @@ from app.config import load_settings
 from app.intent import MessageRequest
 from app.llm_client import LLMClient, LLMError
 from app.message_handler import MessageHandler
-from app.tool_client import ToolClient
+from app.tool_client import ToolClient, validate, validate_schema
 from app.tool_loop import ToolLoop
 
 
@@ -51,6 +51,94 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history[-1]["role"], "tool")
         self.assertEqual(history[-1]["tool_call_id"], "call1")
         self.assertEqual(json.loads(history[-1]["content"]), client.execute.return_value)
+
+    async def test_movement_modes_then_follow_use_boolean_arguments_and_real_results(self):
+        loop, llm, client = self.fixture([
+            call("set_sprint", {"enabled": True}),
+            call("set_sneak", {"enabled": False}, identity="call2"),
+            call("follow_player", {}, identity="call3"),
+            {"content": "跟随已启动。"},
+        ])
+        mode = {"type": "object", "properties": {"enabled": {"type": "boolean"}}, "required": ["enabled"], "additionalProperties": False}
+        empty = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+        client.catalog.return_value = ({name: {"name": name, "description": "移动", "parameters": schema} for name, schema in [
+            ("set_sprint", mode), ("set_sneak", mode), ("follow_player", empty)]}, 7)
+        client.execute.side_effect = [
+            {"success": True, "tool": name, "data": {"status": status}, "error": None}
+            for name, status in [("set_sprint", "completed"), ("set_sneak", "completed"), ("follow_player", "pending")]
+        ]
+        result = await loop.run(REQUEST)
+        self.assertIn("尚未完成", result["reply"])
+        self.assertEqual([item.args[:2] for item in client.execute.await_args_list], [
+            ("set_sprint", {"enabled": True}), ("set_sneak", {"enabled": False}), ("follow_player", {})])
+        client.cancel.assert_not_awaited()
+        self.assertEqual(llm.tool_completion.await_count, 4)
+
+    async def test_boolean_tool_parameters_reject_strings_numbers_and_extra_controls(self):
+        schema = {"type": "object", "properties": {"enabled": {"type": "boolean"}}, "required": ["enabled"], "additionalProperties": False}
+        self.assertTrue(validate_schema(schema))
+        for value in [True, False]:
+            self.assertTrue(validate(schema, {"enabled": value}))
+        for arguments in [{"enabled": 1}, {"enabled": 0}, {"enabled": "true"}, {"enabled": None}, {"enabled": True, "forward": True}, {}]:
+            self.assertFalse(validate(schema, arguments))
+            loop, _, client = self.fixture([call("set_sprint", arguments)])
+            client.catalog.return_value = ({"set_sprint": {"name": "set_sprint", "description": "移动", "parameters": schema}}, 7)
+            with self.assertRaises(LLMError) as error:
+                await loop.run(REQUEST)
+            self.assertEqual(error.exception.code, "INVALID_TOOL_CALL")
+            client.execute.assert_not_awaited()
+
+    async def test_arrived_navigation_can_continue_to_attack_in_same_request(self):
+        loop, llm, client = self.fixture([
+            call("goto_position", {"x": 14, "y": 72, "z": 7}),
+            call("attack_entity", {"entity_id": 2}, identity="call2"),
+            {"content": "已观察到僵尸受伤。"},
+        ])
+        coordinates = {axis: {"type": "number", "minimum": -100, "maximum": 100} for axis in "xyz"}
+        client.catalog.return_value = ({
+            "goto_position": {"name": "goto_position", "description": "导航", "parameters": {"type": "object", "properties": coordinates, "required": list("xyz"), "additionalProperties": False}},
+            "attack_entity": {"name": "attack_entity", "description": "攻击", "parameters": {"type": "object", "properties": {"entity_id": {"type": "integer", "minimum": 0, "maximum": 100}}, "required": ["entity_id"], "additionalProperties": False}},
+        }, 7)
+        client.execute.side_effect = [
+            {"success": True, "tool": "goto_position", "data": {"status": "completed", "movement": {"status": "arrived", "taskId": 42}}, "error": None},
+            {"success": True, "tool": "attack_entity", "data": {"status": "completed", "damageObserved": True, "deathObserved": False}, "error": None},
+        ]
+        result = await loop.run(REQUEST)
+        self.assertIn("受伤", result["reply"])
+        self.assertEqual([args.args[0] for args in client.execute.await_args_list], ["goto_position", "attack_entity"])
+        self.assertEqual(llm.tool_completion.await_count, 3)
+
+    async def test_mining_uses_real_block_query_then_selected_tool(self):
+        loop, llm, client = self.fixture([
+            call("inspect_block", {"position": {"x": 14, "y": 73, "z": 7}}),
+            call("mine_block", {"position": {"x": 14, "y": 73, "z": 7}, "block_name": "oak_log", "tool_name": "diamond_axe"}, identity="call2"),
+            {"content": "目标原木已挖除。"},
+        ])
+        position = {"type": "object", "properties": {axis: {"type": "integer", "minimum": -100, "maximum": 100} for axis in "xyz"}, "required": list("xyz"), "additionalProperties": False}
+        text = {"type": "string", "minLength": 1, "maxLength": 64}
+        client.catalog.return_value = ({
+            "inspect_block": {"name": "inspect_block", "description": "查询", "parameters": {"type": "object", "properties": {"position": position}, "required": ["position"], "additionalProperties": False}},
+            "mine_block": {"name": "mine_block", "description": "挖掘", "parameters": {"type": "object", "properties": {"position": position, "block_name": text, "tool_name": text}, "required": ["position", "block_name"], "additionalProperties": False}},
+        }, 7)
+        client.execute.side_effect = [
+            {"success": True, "tool": "inspect_block", "data": {"status": "completed", "name": "oak_log"}, "error": None},
+            {"success": True, "tool": "mine_block", "data": {"status": "completed", "blockRemoved": True}, "error": None},
+        ]
+        await loop.run(REQUEST)
+        self.assertEqual(client.execute.await_args_list[1].args[1]["tool_name"], "diamond_axe")
+        self.assertEqual([args.args[0] for args in client.execute.await_args_list], ["inspect_block", "mine_block"])
+        prompt = llm.tool_completion.await_args.args[0][0]["content"]
+        self.assertIn("inspect_placement 仅用于放置", prompt)
+
+    async def test_failed_tool_reply_preserves_actionable_reason_without_raw_error(self):
+        for code, expected in [("CANNOT_CONSUME", "饥饿值"),
+                               ("NO_LINE_OF_SIGHT", "遮挡"), ("OCCUPIED", "已有方块"), ("NAVIGATION_FAILED", "导航未完成")]:
+            loop, _, client = self.fixture([call(), {"content": "已经完成了。"}])
+            client.execute.return_value = {"success": False, "tool": "demo", "data": None, "error": {"code": code, "message": "unit-secret"}}
+            result = await loop.run(REQUEST)
+            self.assertIn(expected, result["reply"])
+            self.assertNotIn("unit-secret", result["reply"])
+            self.assertNotIn("已经完成", result["reply"])
 
     async def test_gateway_metadata_and_decoded_arguments_preserve_call_identity(self):
         response = call(identity="call/functions.follow_player:0")
@@ -295,6 +383,14 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("mine_block", catalog)
         self.assertIn("query_status", catalog)
         self.assertIn("smelt_item", catalog)
+        self.assertIn("jump", catalog)
+        for name in ["set_sprint", "set_sneak"]:
+            schema = catalog[name]["parameters"]
+            self.assertEqual(schema["properties"]["enabled"], {"type": "boolean"})
+            self.assertTrue(validate(schema, {"enabled": True}))
+            self.assertTrue(validate(schema, {"enabled": False}))
+            self.assertFalse(validate(schema, {"enabled": 1}))
+            self.assertFalse(validate(schema, {"enabled": "false"}))
         self.assertEqual(len(catalog), len({item["name"] for item in actual["tools"]}))
 
     async def test_tool_http_timeout_and_connection_errors(self):

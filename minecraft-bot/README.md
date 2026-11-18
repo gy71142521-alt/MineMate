@@ -2,6 +2,8 @@
 
 > Task 006 的新工具系统说明见本文末尾；此前 Task 001～005 各节保留阶段历史。
 
+> 临时测试界面：在项目根目录双击 `start-minemate.cmd`，可一键启动/停止 Node 和 Python，并分别查看实时日志。前置配置与使用限制见 [启动器说明](../README.md#临时测试启动器windows)。
+
 通过 Mineflayer 连接 Minecraft Java Edition 的 Open to LAN 世界，支持聊天、跟随、停止、坐标导航、游戏状态感知，以及 Python Agent 云端 LLM 自然语言理解和可选 Tool Calling。Node 使用 JavaScript CommonJS，直接依赖为 `mineflayer`、`dotenv`、`mineflayer-pathfinder`、`vec3`；Python 复用已有的 `httpx` 和 Pydantic，没有新增依赖。
 
 Task 001～004 已由用户确认完成并通过测试。本次 Task 005 未操作真实游戏、账号授权、真实 `.env` 或认证缓存。
@@ -597,10 +599,10 @@ Task 005 初版恢复后的回归结果：**Node 94/94 通过，Python 28/28 通
 ```text
 minecraft-bot/src/
 ├── tools/
-│   ├── index.js             # 唯一注册组装入口，26 个工具
+│   ├── index.js             # 唯一注册组装入口，30 个工具
 │   ├── registry.js          # 校验、权限、互斥、超时、去重和取消
 │   ├── schema.js / common.js
-│   ├── movement/index.js    # Task 002 原实现
+│   ├── movement/            # index.js 任务；controls.js 模式/跳跃；tools.js 注册；navigation.js 有界等待
 │   ├── perception/          # Task 003 原实现
 │   ├── mining/index.js
 │   ├── building/index.js
@@ -619,7 +621,7 @@ agent/app/
 
 玩家自然语言 → Node 聊天分流 → Python `/api/agent/message` → 获取 Node 工具目录和世界快照 → LLM 返回 `tool_calls` → Python 校验 → Node 再次校验并执行 → 真实结果以 `role=tool` 和 `tool_call_id` 回传模型 → Minecraft 文本回复。Python 不直接操作游戏，也不维护另一套游戏工具定义。
 
-Task 002 移动与 Task 003 感知实现已迁入统一目录，旧导入路径仍导出同一模块。聊天与原 `/api/movement/*`、`/api/world` 接口继续复用相同实例。新动作开始前停止原移动，修改游戏状态的工具互斥；本地“停止”优先取消，不等待 LLM。
+Task 002 移动与 Task 003 感知实现已迁入统一目录，旧导入路径仍导出同一模块。聊天与原 `/api/movement/*`、`/api/world` 接口继续复用相同实例。非移动动作开始前停止原移动；移动模式和单次跳跃复用当前移动目标。异步修改工具互斥，本地“停止”优先取消，不等待 LLM。
 
 ### 工具清单与参数
 
@@ -633,18 +635,22 @@ Task 002 移动与 Task 003 感知实现已迁入统一目录，旧导入路径�
 | 感知 | `nearby_entities` | 复用 Task 003 实体范围/数量配置 |
 | 感知 | `nearby_blocks` | 复用 Task 003 方块范围/数量/缓存配置 |
 | 移动 | `follow_player` | 跟随请求发送者，返回 pending |
-| 移动 | `goto_position` | `x,y,z` 可为小数；仍受原导航范围与时限约束，返回 pending |
+| 移动 | `goto_position` | `x,y,z` 可为小数；`wait_seconds?` 为 0–15，默认等待 15 秒；实际到达返回 completed，仍在移动返回 pending |
+| 挖掘 | `inspect_block` | `position`；只读查询单个坐标的实际名称、距离、可见和可挖情况，用于识别待挖掘方块 |
 | 移动 | `stop_movement` | 优先停止并取消当前动作 |
+| 移动 | `set_sprint` | `enabled` 必须为 JSON 布尔值；允许/禁止寻路器跑步，不自动向前走 |
+| 移动 | `set_sneak` | `enabled` 必须为 JSON 布尔值；持续潜行，关闭后恢复先前跑步设置 |
+| 移动 | `jump` | `{}`；地面上单次跳跃，3 秒内观察起跳并落地才返回 completed |
 | 挖掘 | `find_block` | `block_name,radius?`（整数 1–16，默认 5）、`max_results?`（1–16，默认 8） |
-| 挖掘 | `mine_block` | `block_name,position,max_distance?`（1–4.5，默认 4.5）；仅明确指定的一个方块，不自动拾取 |
+| 挖掘 | `mine_block` | `block_name,position,max_distance?`（1–4.5，默认 4.5）、`tool_name?`（如 diamond_axe）；仅明确指定的一个方块，不自动拾取 |
 | 物品 | `collect_item` | `item_name,radius?`（1–8，默认 8）、`entity_id?`；有限等待并验证背包增量 |
 | 建造 | `inspect_placement` | `block_name,position,reference_position,face`；只检查条件 |
 | 建造 | `place_block` | 同上；face 为 up/down/north/south/east/west，单个空位置，不能覆盖已有方块 |
 | 战斗 | `find_entity` | `entity_type,radius?`（1–16，默认 16）、`max_results?`（1–16，默认 8） |
 | 战斗 | `attack_entity` | `entity_id,weapon?,max_distance?`（1–3，默认 3）、`max_hits?`（1–3，默认 1）；只攻击白名单敌对生物，不追击 |
 | 物品 | `equip_item` | `item_name,destination`；hand/off-hand/head/torso/legs/feet |
-| 物品 | `consume_item` | `item_name`；仅已知食物、蜂蜜和牛奶 |
-| 物品 | `drop_item` | `item_name,count`（1–16）；仅普通低价值白名单，拒绝全部背包 |
+| 物品 | `consume_item` | `item_name`；已知食物、蜂蜜和牛奶，金苹果及附魔金苹果允许满饥饿食用；普通食物保留饥饿检查 |
+| 物品 | `drop_item` | `item_name,count`（1–16）；支持任意背包物品，包括钻石、附魔装备，允许丢完指定物品；不判断价值、不设物品白名单 |
 | 物品 | `use_item` | `item_name,entity_id?`；按食物/牛奶、盾、剪刀分别调用 API，剪刀必须指定附近羊 |
 | 交互 | `open_workbench` | `position`；打开、返回快照、关闭 |
 | 交互 | `open_furnace` | `position`；打开、返回快照、关闭 |
@@ -657,6 +663,64 @@ Task 002 移动与 Task 003 感知实现已迁入统一目录，旧导入路径�
 `smelt_item` 的 start 还要求白名单原料/燃料、足量背包物品、空熔炉槽；放入后返回 pending。status 可查询进度和输出；take 要求指定实际产物名称与输出槽整批数量，取出后核对背包。开始熔炼不会被报告为产物已完成。
 
 默认交互距离为 4.5 格，实体距离包含垂直高度。寻路依然 `canDig=false`，禁止为走路挖掘或搭方块；`mine_block` 是另行明确授权的单方块操作。挖掘检查名称、可见性、工具、耐久和采集条件，拒绝脚下支撑、储物方块及受保护类型。放置检查相邻支撑面、空位置、实体碰撞与背包。
+
+指定坐标但不知道方块名称时，可先 `inspect_block`，再用查询到的名称调用 `mine_block`；`inspect_placement` 仅用于放置检查，已有方块返回 OCCUPIED 并不表示该方块不可挖。玩家指定“使用钻石斧”时应传入 `tool_name=diamond_axe`，缺少工具或该工具无法采集时拒绝，不擅自换成其他工具。
+
+攻击请求应从快照或 `find_entity` 获取实体 ID，然后执行 `attack_entity`（可直接传 weapon）。需要靠近时先导航：工具导航在最多 15 秒内收到对应 taskId 的真实到达事件后返回 completed，Agent 才能继续攻击；未到达仍返回 pending 并结束当前轮，不把移动视为已攻击。这个等待不会改变旧聊天“前往”和 Task 004 移动 HTTP 接口的即时返回行为。
+
+### 跑步、潜行与跳跃
+
+三项能力都在 `src/tools/movement/`，使用同一个 Bot、同一个跟随/导航目标。旧 `follow/goTo/stop/getState` 及聊天、HTTP 接口保留；新增控制器接口为 `setSprint(username, enabled)`、`setSneak(username, enabled)`、`jump(username, {signal}?)`（Promise）和只读 `getMotionState()`。
+
+- 跑步是寻路速度许可，不保证任何地形都能冲刺，也不创建前进按键。默认 `sprint:null` 延续旧版 pathfinder 自动选择速度；显式 false 禁止跑步，true 允许安全路段跑步。饥饿及服务端规则仍可能限制实际速度。
+- 潜行优先：开启期间禁止跑步，关闭后恢复原先设置；例如先禁止跑步、再开启/关闭潜行，仍保持禁止跑步。潜行支持持续跟随和导航，但不能保证任意地形安全可达，原卡住/超时限制继续生效。
+- 切换本控制器的跟随/导航目标保留模式，正常到达后也保留，直到关闭或停止。停止、取消、失败、超时、目标丢失、死亡、重生、换维度及断线清除显式模式和按键，恢复旧版自动速度策略；停止不会在之后的帧恢复潜行。
+- `jump` 只发一个物理帧的手动起跳脉冲，地面/非液体时才能开始；最多 3 秒确认起跳和落地，不能确认则失败并停止移动。不会持续自动跳跃。地形需要的寻路跳跃仍由 pathfinder 决定。
+- 同步模式设置可在 `goto_position` 有限等待期间执行，保留导航锁和 taskId。跳跃仍占异步修改锁，不能与另一个正在等待的异步工具并发；可在已返回 pending 的跟随/导航任务中使用。`goto_position(wait_seconds=0)` 可立即返回后台导航。跳跃期间其它修改工具返回 BUSY，本地“停止”仍立即取消。
+
+自然语言示例（需 `TOOL_CALLING_ENABLED=true`、供应商支持 function tools；实际选工具须查看日志）：
+
+1. “开启跑步，然后跟着我” → `set_sprint({enabled:true})` → `follow_player({})`。
+2. “潜行跟着我” → `set_sneak({enabled:true})` → `follow_player({})`。
+3. “关闭潜行，继续跟随” → `set_sneak({enabled:false})`，保留当前目标。
+4. “跳一下” → `jump({})`，观察落地后才回复完成。
+5. “停止” → 本地立即停止并清理模式。
+
+要区分模型选工具问题与游戏执行问题，可在 Node 已连接时直接调用实际工具。下面先定义 PowerShell 辅助函数，将 `Steve` 改成有权限的真实游戏昵称；每次调用读取当前 generation 并生成唯一 requestId：
+
+```powershell
+function Invoke-MineMateTool($name, $arguments) {
+    $catalog = Invoke-RestMethod 'http://127.0.0.1:3000/api/tools'
+    $body = @{ username = 'Steve'; tool = $name; arguments = $arguments; requestId = [guid]::NewGuid().ToString('N'); generation = $catalog.data.generation } | ConvertTo-Json -Depth 8
+    Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3000/api/tools/execute' -ContentType 'application/json' -Body $body | ConvertTo-Json -Depth 12
+}
+```
+
+```powershell
+Invoke-MineMateTool 'set_sprint' @{ enabled = $true }
+```
+
+```powershell
+Invoke-MineMateTool 'follow_player' @{}
+```
+
+```powershell
+Invoke-MineMateTool 'set_sneak' @{ enabled = $true }
+```
+
+```powershell
+Invoke-MineMateTool 'set_sneak' @{ enabled = $false }
+```
+
+```powershell
+Invoke-MineMateTool 'jump' @{}
+```
+
+```powershell
+Invoke-MineMateTool 'stop_movement' @{}
+```
+
+与已安装的 Mineflayer **4.39.0** `docs/api.md`、`lib/plugins/physics.js` 和 pathfinder **2.4.5** `index.js`、`lib/movements.js` 核对后，使用 `setControlState/getControlState/clearControlStates`、`physicsTick`、`Movements.allowSprinting` 和 `setMovements`。物理模拟在 physicsTick 之前运行；控制层在寻路监听器前释放上一帧手动跳跃，在其后应用模式及一次脉冲。当前 Mineflayer 的 `clearControlStates` 不清除 `jumpQueued`，因此释放本模块手动脉冲或取消整个移动目标时会补清理该队列字段；升级依赖时须重查这一实现并重跑集成及游戏验证。
 
 ### 配置与启动
 
@@ -773,7 +837,7 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3000/api/tools/execute' -C
 ### 执行边界与模型兼容性
 
 - 注册表默认单工具 20 秒，最多 4 个在途请求，仅一个游戏修改操作。Python 默认最多 4 次工具调用（配置上限 8）、总时限 90 秒；保持原消息限频与并发限制。LLM 每轮只能返回一个调用。
-- 持续跟随不使用坐标任务 60 秒总时限；跟随/导航启动后返回 pending，沿用原移动状态与完成事件。拾取最多等待 10 秒；攻击最多 3 次，间隔 700ms，无无限追击。
+- 持续跟随不使用坐标任务 60 秒总时限；跟随启动返回 pending，工具导航默认最多等待 15 秒确认到达。沿用原移动状态与完成事件；等待期间可停止，超时仍 pending 而不虚报到达。拾取最多等待 10 秒；攻击最多 3 次，间隔 700ms，无无限追击。
 - 失败、pending、uncertain 结果会终止本轮执行，并交给模型生成回复；程序阻止其被文本改写为“全部完成”。工具循环不自动重试失败动作，也不做长期计划。
 - 停止、消息取消、断线和总超时会清理动作/窗口；取消不能撤销已经生效的挖掘、放置、攻击或存取。底层 API 若不能立即中断，先响应超时并保留互斥锁，直到原 Promise 结算；持续卡住时需重新连接 Bot。
 - 当前支持普通工作台、普通熔炉、箱子/陷阱箱/木桶。酿造、附魔、铁砧、砂轮、高炉、烟熏炉、其他容器需要独立适配器；未实现批量建筑、任意道具、复杂配方链或 Task 007 规划。
@@ -810,18 +874,18 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3000/api/tools/execute' -C
 
 ### 自动化结果与 Minecraft 验收
 
-本次最终自动化结果、文件清单和限制见 [Task 006 实施记录](../docs/tasks/task006-implementation.md)。Mock 覆盖注册/Schema 同步、工具执行与结果验证、超时取消、迟到窗口/回复、去重、调用上限和旧功能回归；不依赖真实游戏或付费模型。
+本次最终自动化结果、文件清单和限制见 [Task 006 实施记录](../docs/tasks/task006-implementation.md)。Mock 覆盖注册/Schema 同步、工具执行与结果验证、超时取消、迟到窗口/回复、去重、调用上限和旧功能回归；不依赖真实游戏或付费模型。工具失败会显示对应的程序定义原因，不回显内部原始错误，也不被模型改写为成功。
 
 真实 Minecraft 验收请在可控测试区域依次执行，并核对操作前后方块、实体、背包与容器：
 
 1. 回归“你好”“状态”“背包”“附近”“环境”“跟随我”“前往 X Y Z”“停止”及原 HTTP 接口，确认旧功能正常、走路不自动挖掘或搭块。
-2. 检查 `/api/tools` 无重复的 26 个定义；查询快照核对真实生命值、背包、坐标和实体距离。
+2. 检查 `/api/tools` 无重复的 30 个定义；查询快照核对真实生命值、背包、坐标和实体距离。
 3. 供应商协议通过后，用自然语言“查询一下我的背包”“请跟着我走”“到坐标 X Y Z 附近”。pending 只能表示启动，抵达/跟随情况以游戏与移动状态为准。
-4. 指定一个近处测试方块，先查找，再明确要求挖该坐标一个方块；检查实际消失、工具选择/耐久与拾取前后数量。用受保护方块、超距或错误名称验证拒绝。
+4. 指定一个近处测试方块，先用 inspect_block 查询，再要求使用钻石斧挖该坐标一个原木；确认先查询实际方块，再调用 mine_block，实际方块消失、手持工具正确且耐久变化合理。用受保护方块、超距、错误名称或不合适的指定工具验证拒绝。
 5. 让 Bot 拾取近处掉落物，确认数量增加；拾取失败或被别的玩家抢走时不得虚报成功。
 6. 给 Bot 普通方块，指定空目标、普通支撑方块和面；先 inspect 再放一个方块。占用位置、实体碰撞、缺物品时应拒绝。
-7. 在安全区域指定一只近处敌对生物，最多 1–3 次攻击；玩家/中立生物/超距目标应拒绝，不能因目标消失就声称击杀。
-8. 测试装备、吃食物、举盾/剪羊毛、少量丢弃普通白名单物品；重要物品、超量和未知道具应拒绝。
+7. 在安全区域指定一只近处敌对生物，最多 1–3 次攻击；需要靠近时确认 goto_position 返回 completed 后调用 attack_entity，而不只是反复导航。玩家/中立生物/超距目标应拒绝，不能因目标消失就声称击杀。
+8. 测试装备、吃食物、举盾/剪羊毛；满饥饿时测试食用一枚附魔金苹果，普通苹果仍应拒绝。分别明确指定丢弃 4 个橡木木板、1 个钻石和 1 件附魔装备，核对真实数量；背包只剩指定物品时也可全部丢出。非法数量、数量不足、物品不存在仍拒绝，服务器未确认数量变化时返回 uncertain。丢弃不按价值额外确认，物品名称/数量不明确时先询问。
 9. 测试打开工作台/熔炉/箱子后窗口关闭；合成有材料的基础配方，缺材料/无配方时应明确失败。箱子存取检查双方数量，不重复转移。
 10. 空普通熔炉先 start，确认只报告 pending；再 status 查输出，产物满足后 take，并核对背包。无燃料/无原料/槽被占用时应拒绝。
 11. 操作中输入“停止”，再立即发新任务；确认旧任务不能恢复、旧回复不误报、不再执行后续步骤。测试死亡、换维度、退出世界、Python 断开和超时后的窗口与状态清理。
@@ -836,6 +900,8 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3000/api/tools/execute' -C
 - `src/auth.js`：统一 Microsoft/Offline 认证选项。
 - `src/bot.js`：Bot 创建、连接事件和错误分类。
 - `src/tools/movement/index.js`：保守移动配置、统一跟随/导航/停止接口、单任务状态、超时与生命周期清理。
+- `src/tools/movement/controls.js`：跑步/潜行状态、速度恢复、单次跳跃、物理帧按键协调及清理。
+- `src/tools/movement/tools.js`：三项新增移动能力的注册与 Schema；`navigation.js` 保留有界等待职责。
 - `src/tools/perception/index.js`：统一只读接口、稳定快照、异常隔离与生命周期/缓存管理。
 - `src/tools/perception/playerState.js`：自身状态、数值坐标及只读移动任务摘要。
 - `src/tools/perception/inventory.js`：背包槽位、装备副本和物品数量汇总。

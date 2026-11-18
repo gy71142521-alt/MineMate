@@ -1,11 +1,12 @@
 const { object, text, number } = require('../schema');
 const { ensure, count, itemByName, items, state } = require('../common');
 const { validEntity } = require('../combat/helpers');
-const DROPPABLE = new Set(['dirt', 'cobblestone', 'gravel', 'sand', 'netherrack', 'rotten_flesh']);
+// 与当前 Mineflayer consume 的原版满饥饿食用例外保持一致。
+const ALWAYS_EDIBLE = new Set(['golden_apple', 'enchanted_golden_apple']);
 async function consume(ctx, name) {
   const { bot } = ctx, item = itemByName(bot, name), food = bot.registry.foodsByName?.[name];
   ensure(food || name === 'milk_bucket' || name === 'honey_bottle', 'UNSUPPORTED_ITEM', '当前只支持已知食物、蜂蜜或牛奶；其他饮品效果需另行适配。');
-  ensure(!food || bot.food < 20, 'CANNOT_CONSUME', '饥饿值已满，当前不使用食物。');
+  ensure(!food || bot.food < 20 || ALWAYS_EDIBLE.has(name) || bot.game?.gameMode === 'creative', 'CANNOT_CONSUME', '饥饿值已满，普通食物当前不能食用；金苹果和附魔金苹果不受此限制。');
   const before = { count: count(bot, name), health: bot.health, food: bot.food };
   await ctx.step(() => bot.equip(item, 'hand'));
   ctx.cleanup(() => bot.deactivateItem());
@@ -23,14 +24,12 @@ function registerInventory(registry) {
       return state(actual?.name === a.item_name ? 'completed' : 'uncertain', { destination: a.destination, actualItem: actual?.name ?? null });
     }
   });
-  registry.register({ name: 'consume_item', description: '使用已知食物或牛奶，验证背包数量及生命/饥饿变化。', parameters: object({ item_name: text }), execute: (ctx, a) => consume(ctx, a.item_name) });
-  registry.register({ name: 'drop_item', description: '只丢弃最多 16 个普通低价值物品，不支持重要物品或整个背包。',
+  registry.register({ name: 'consume_item', description: '食用指定已知食物或牛奶；金苹果/附魔金苹果允许满饥饿食用，使用后验证数量变化。', parameters: object({ item_name: text }), execute: (ctx, a) => consume(ctx, a.item_name) });
+  registry.register({ name: 'drop_item', description: '按明确指定的物品名称和数量丢弃任意背包物品，包含钻石及附魔装备，不判断价值；单次 1–16 个，允许丢完指定物品。',
     parameters: object({ item_name: text, count: number(1, 16, true) }),
     async execute(ctx, a) {
-      ensure(DROPPABLE.has(a.item_name), 'PROTECTED_ITEM', '该物品不在允许丢弃的低价值白名单。');
       const item = itemByName(ctx.bot, a.item_name), before = count(ctx.bot, a.item_name);
       ensure(before >= a.count, 'INSUFFICIENT_ITEMS', '物品数量不足。');
-      ensure(items(ctx.bot).reduce((sum, value) => sum + value.count, 0) > a.count, 'EMPTY_INVENTORY_FORBIDDEN', '不能丢弃全部背包。');
       await ctx.step(() => ctx.bot.toss(item.type, null, a.count));
       const delta = before - count(ctx.bot, a.item_name);
       return state(delta === a.count ? 'completed' : 'uncertain', { item: a.item_name, dropped: delta });

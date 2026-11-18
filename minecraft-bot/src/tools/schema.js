@@ -5,6 +5,7 @@ const object = (properties = {}, required = Object.keys(properties)) => ({ type:
 const position = object({ x: number(-29999984, 29999984, true), y: number(-2048, 2047, true), z: number(-29999984, 29999984, true) });
 function validate(schema, value) {
   if (schema.enum && !schema.enum.includes(value)) return false;
+  if (schema.type === 'boolean') return typeof value === 'boolean';
   if (schema.type === 'object') {
     return value !== null && typeof value === 'object' && !Array.isArray(value) &&
       schema.required.every((key) => Object.hasOwn(value, key)) &&

@@ -41,12 +41,25 @@ function createRegistry(bot, { movement, perception, ownerUsername = '', logger 
       try { return { success: true, tool: name, data: definition.execute({ bot, movement, perception, username }, args), error: null }; }
       catch { return fail(name, 'EXECUTION_FAILED', '停止操作失败。'); }
     }
+    // 模式是同步控制配置，可在导航等待期间调整，但不能插入挖掘等动作。
+    if (definition.control) {
+      if (active && !active.compatibleControls) return fail(name, 'BUSY', 'Bot 正在执行另一项操作，请先停止。');
+      try {
+        logger.log(`[Tools] 开始 ${name}`);
+        const data = definition.execute({ bot, movement, perception, username }, args);
+        logger.log(`[Tools] 结束 ${name}：${data.status}`);
+        return { success: true, tool: name, data, error: null };
+      } catch (error) {
+        logger.error(`[Tools] ${name}：MOVEMENT_REJECTED`);
+        return fail(name, 'MOVEMENT_REJECTED', error instanceof ToolError ? error.message : '移动模式设置失败。');
+      }
+    }
     if (definition.mutates !== false && active) return fail(name, 'BUSY', 'Bot 正在执行另一项操作，请先停止。');
     if (running >= 4) return fail(name, 'BUSY', '并发工具请求已达到上限。');
     running += 1;
     const controller = new AbortController();
-    const token = { controller, name, username, requestId };
-    if (definition.mutates !== false) { active = token; pendingMovement = null; }
+    const token = { controller, name, username, requestId, compatibleControls: definition.compatibleControls === true };
+    if (definition.mutates !== false) { active = token; if (!definition.preserveMovement) pendingMovement = null; }
     const cleanups = [];
     const check = () => {
       if (controller.signal.aborted) throw controller.signal.reason;
@@ -126,13 +139,17 @@ function createRegistry(bot, { movement, perception, ownerUsername = '', logger 
   }
   function guardMovement() {
     if (!movement) return;
-    for (const method of ['follow', 'goTo']) {
+    for (const method of ['follow', 'goTo', 'setSprint', 'setSneak', 'jump']) {
       if (typeof publicMovement[method] !== 'function') continue;
       const original = publicMovement[method].bind(publicMovement);
       publicMovement[method] = (...args) => {
-        if (active) return { ok: false, status: 'busy', message: 'Bot 正在执行操作，请先停止。' };
+        const control = ['setSprint', 'setSneak'].includes(method);
+        if (active && !(control && active.compatibleControls)) {
+          const denied = { ok: false, status: 'busy', message: 'Bot 正在执行操作，请先停止。' };
+          return method === 'jump' ? Promise.resolve(denied) : denied;
+        }
         const result = original(...args);
-        if (result?.ok && access(args[0])) cancel(args[0]);
+        if (['follow', 'goTo'].includes(method) && result?.ok && access(args[0])) cancel(args[0]);
         return result;
       };
     }
@@ -148,7 +165,9 @@ function createRegistry(bot, { movement, perception, ownerUsername = '', logger 
   const originalStop = movement?.stop?.bind(movement);
   const internalMovement = movement ? Object.create(movement) : undefined;
   if (internalMovement && originalStop) internalMovement.stop = originalStop;
-  for (const method of ['follow', 'goTo']) if (typeof movement?.[method] === 'function') internalMovement[method] = movement[method].bind(movement);
+  for (const method of ['follow', 'goTo', 'setSprint', 'setSneak', 'jump']) if (typeof movement?.[method] === 'function') internalMovement[method] = movement[method].bind(movement);
+  // 等待导航使用原控制器的事件存储，不能在 Object.create 的包装对象上创建第二套监听状态。
+  for (const method of ['on', 'removeListener']) if (typeof movement?.[method] === 'function') internalMovement[method] = movement[method].bind(movement);
   movement = internalMovement;
   const onSpawn = () => { ready = true; };
   const onPause = () => { ready = false; cancel(null, true); };

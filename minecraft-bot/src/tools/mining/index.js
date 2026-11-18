@@ -2,6 +2,14 @@ const { object, text, number, position } = require('../schema');
 const { ensure, blockAt, vector, distance, plainPosition, count, items, usable, state } = require('../common');
 
 function registerMining(registry) {
+  registry.register({ name: 'inspect_block', description: '只读查询明确坐标的实际方块名称、距离和可挖/可见情况；用于挖掘前识别目标，不检查放置。', mutates: false,
+    parameters: object({ position }),
+    execute(ctx, a) {
+      const block = blockAt(ctx, a.position);
+      return state('completed', { name: block.name, position: plainPosition(block.position), distance: distance(ctx.bot.entity.position, block.position),
+        diggable: Boolean(ctx.bot.canDigBlock(block)), visible: Boolean(ctx.bot.canSeeBlock(block)) });
+    }
+  });
   registry.register({ name: 'find_block', description: '在已加载区块的有限半径内查找指定方块，最多返回 16 项。', mutates: false,
     parameters: object({ block_name: text, radius: number(1, 16, true), max_results: number(1, 16, true) }, ['block_name']),
     execute(ctx, a) {
@@ -14,8 +22,8 @@ function registerMining(registry) {
       return state('completed', { blocks: results.slice(0, maximum), truncated: results.length > maximum });
     }
   });
-  registry.register({ name: 'mine_block', description: '只挖掘明确指定坐标的单个方块，检查距离、工具与耐久；不自动拾取。',
-    parameters: object({ block_name: text, position, max_distance: number(1, 4.5) }, ['block_name', 'position']),
+  registry.register({ name: 'mine_block', description: '挖掘明确坐标的一个方块；名称未知先 inspect_block。tool_name 可指定钻石斧等背包工具；校验距离/视线/耐久/采集条件，不自动拾取。',
+    parameters: object({ block_name: text, position, max_distance: number(1, 4.5), tool_name: text }, ['block_name', 'position']),
     async execute(ctx, a) {
       const { bot } = ctx;
       let block = blockAt(ctx, a.position, a.max_distance ?? 4.5);
@@ -24,6 +32,13 @@ function registerMining(registry) {
       const floor = bot.entity.position.floored();
       ensure(!(floor.x === a.position.x && floor.z === a.position.z && floor.y - 1 === a.position.y), 'UNSAFE_TARGET', '不能挖掘 Bot 脚下的支撑方块。');
       ensure(block.hardness >= 0 && typeof block.canHarvest === 'function', 'NOT_DIGGABLE', '方块无法安全挖掘。');
+      if (a.tool_name) {
+        const selected = items(bot).find((item) => item.name === a.tool_name);
+        ensure(selected, 'TOOL_MISSING', '背包中没有指定的挖掘工具。');
+        usable(selected);
+        ensure(block.canHarvest(selected.type), 'WRONG_TOOL', '指定工具无法采集该方块，请选择合适的工具。');
+        await ctx.step(() => bot.equip(selected, 'hand'));
+      }
       if (!block.canHarvest(bot.heldItem?.type)) {
         const tool = items(bot).find((item) => block.canHarvest(item.type) && (!item.maxDurability || item.maxDurability - item.durabilityUsed > 1));
         ensure(tool, 'TOOL_MISSING', '缺少可采集此方块且耐久足够的工具。');
