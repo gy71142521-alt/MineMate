@@ -5,7 +5,7 @@
 ## 1. 一条日志长什么样
 
 ```text
-2026-11-19 19:20:31 WARNING minemate.tools [rid=8f3a1c2d] [Tools] 模型输出校验失败：reason=PARALLEL_TOOL_CALLS code=PARALLEL_TOOL_CALLS detail=parallel calls rejected count=2 names=mine_block,collect_item
+2026-11-19 19:20:31 WARNING minemate.tools [rid=8f3a1c2d] [Tools] 模型输出校验失败：reason=PARALLEL_TOOL_CALLS code=PARALLEL_TOOL_CALLS detail=batch too large count=9 limit=8 names=mine_block,collect_item
 2026-11-19 19:20:31 WARNING minemate.agent [rid=8f3a1c2d] [Agent] 消息处理失败 | player=Steve code=INVALID_TOOL_CALL status=502 message_len=12 active=1 elapsed_ms=31 | LLMError: 模型返回了无效工具调用或回复，已拒绝继续执行；此前操作请查询状态。
 2026-11-19 19:20:31 WARNING minemate.http [rid=8f3a1c2d] [HTTP] /api/agent/message 失败 player=Steve status=502 code=INVALID_TOOL_CALL elapsed_ms=35
 ```
@@ -77,15 +77,15 @@ Pydantic `TOOL_CALL_FORMAT` 是例外：即使 `all` 模式也不打印 `Validat
 
 ### 5.1 `reason=PARALLEL_TOOL_CALLS`
 
-模型一次返回了多个工具调用，而 MineMate 要求每轮只调用一个以保持串行和可取消。
+单次模型响应返回的工具调用超过上限（当前 8 个）时，整批拒绝，不执行其中任何一个。2–8 个调用是允许的，会按模型给出的顺序串行执行；执行到 `pending`、失败或 `uncertain` 后，同一批剩余调用标记为 `NOT_EXECUTED`，不会继续执行。
 
 ```text
-reason=PARALLEL_TOOL_CALLS code=PARALLEL_TOOL_CALLS detail=parallel calls rejected count=3 names=mine_block,collect_item,inspect_inventory calls=0:id=10,type=function,name=mine_block,args=str(42) | 1:id=12,type=function,name=collect_item,args=str(18) | 2:id=9,type=function,name=inspect_inventory,args=str(2)
+reason=PARALLEL_TOOL_CALLS code=PARALLEL_TOOL_CALLS detail=batch too large count=9 limit=8 names=mine_block,collect_item,inspect_inventory calls=0:id=10,type=function,name=mine_block,args=str(42) | 1:id=12,type=function,name=collect_item,args=str(18) | 2:id=9,type=function,name=inspect_inventory,args=str(2)
 ```
 
 `calls=` 是每个调用的结构摘要（id 长度、type、工具名、参数类型和长度），不会包含参数值。设置 `LOG_TRACEBACK=all` 后还会追加 `preview=`，可以看到模型返回的原始调用 JSON（脱敏、限长）。
 
-处理：确认提示词是否被改动；不要把 `parallel_tool_calls` 改成 true；模型不支持串行约束时换模型。
+处理：如果只是 2–3 个查询，不需要处理，系统会串行执行；如果模型一次返回大量调用，提示它优先一次一个，或检查供应商是否忽略 `parallel_tool_calls=false`。
 
 ### 5.2 `reason=ARGUMENTS_SCHEMA`
 
@@ -97,16 +97,26 @@ reason=ARGUMENTS_SCHEMA code=ARGUMENTS_SCHEMA tool=mine_block schema=missing=pos
 
 默认模式不记录参数值；`LOG_TRACEBACK=all` 时 `arguments_preview` 会给出脱敏、限长的参数预览。用 `GET /api/tools` 查看该工具的真实 Schema。
 
-### 5.3 `LLM_TOOL_CALLING_REJECTED`
+### 5.3 `DUPLICATE_TOOL_CALL`
+
+现在只拒绝**相同 `tool_call_id`** 的重复调用，不再因为“工具名和参数相同”而拒绝。连续 `jump`、连续查询等成功动作可以在总调用预算内重复执行；失败、`pending`、`uncertain` 后不会重试。
+
+```text
+reason=DUPLICATE_TOOL_CALL code=DUPLICATE_TOOL_CALL detail=duplicate call id tool=jump call_id_len=32
+```
+
+如果看到该错误，检查模型是否复用了上一条 tool call 的 `id`；这不是工具参数格式问题。
+
+### 5.4 `LLM_TOOL_CALLING_REJECTED`
 
 供应商返回 400/422，通常是不支持 `tools` 或参数不兼容。日志中的 `body=` 会给出脱敏后的供应商说明。
 
-### 5.4 `NODE_UNAVAILABLE` / `TOOL_API_TIMEOUT`
+### 5.5 `NODE_UNAVAILABLE` / `TOOL_API_TIMEOUT`
 
 - `NODE_UNAVAILABLE`：Python 连不上 Node，先看 Node 是否启动、端口是否一致。
 - `TOOL_API_TIMEOUT`：结果**未确认**，不要直接重发副作用；用原 `requestId` 查询回执。
 
-### 5.5 后台任务
+### 5.6 后台任务
 
 ```text
 [Execution] 工具调用开始 task=... tool=smelt_item request_id=... call=3

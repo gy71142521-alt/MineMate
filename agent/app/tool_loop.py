@@ -19,9 +19,9 @@ TOOL_PROMPT = """你是 Minecraft 玩伴 MineMate。只调用提供的 function 
 跑步、潜行使用 set_sprint/set_sneak 的布尔 enabled；先设模式再跟随或导航，同一移动系统保留模式。潜行暂时覆盖跑步，关闭潜行恢复原设置。模式开启不表示已经移动。
 跳一下使用 jump，不循环跳跃；已有跟随/导航目标时 jump 不替换目标。停止会清理全部移动模式。pending 仍然结束本轮，不绕过工具串行限制。
 只有收到工具的真实结果才能报告结果。pending 表示尚未完成，uncertain 表示无法确认；不得报告成功。
-一次只调用一个工具，禁止重复失败操作；没有明确指定目标时先询问，不能猜测挖掘/放置坐标。
+优先一次调用一个工具；如果模型一次返回多个，程序会按顺序执行，遇到 pending、失败或 uncertain 会停止后续调用。成功后的相同动作可以再次调用（例如连续跳跃），但受总调用次数限制；失败、超时或 pending 后不得重试。没有明确指定目标时先询问，不能猜测挖掘/放置坐标。
 默认不攻击玩家或中立生物、不大范围破坏。长距离交互先导航并告知尚未到达。
-丢弃工具支持任意物品，不按贵重程度拒绝或要求额外确认；依据玩家明确指定的名称与数量执行，不自行决定丢弃其他物品。名称或数量不明确时先询问。
+丢弃工具支持任意物品，不按贵重程度拒绝或要求额外确认；ß依据玩家明确指定的名称与数量执行，不自行决定丢弃其他物品。名称或数量不明确时先询问。
 挖掘已指定坐标但不知道方块名称时先 inspect_block，再 mine_block；inspect_placement 仅用于放置，不能代替挖掘检查。
 玩家指定钻石斧等工具时用 mine_block 的 tool_name，不能忽略要求；坐标和方块名必须来自玩家或真实查询结果。
 攻击先从快照或 find_entity 获取真实 entity_id，再 attack_entity；其 weapon 参数可直接装备武器，不必另调 equip_item。
@@ -30,6 +30,9 @@ TOOL_PROMPT = """你是 Minecraft 玩伴 MineMate。只调用提供的 function 
 涉及物品或方块的自然语言目标时，先调用只读 resolve_resource；query 使用从玩家原话提取并翻译出的目标短语，kind 使用 item、block 或 any。后续参数只能使用 resolve_resource 返回的真实 name，禁止凭空编造 ID；候选为空或 ambiguous 为 true 时必须向玩家澄清，不得执行操作。Node 的运行时 registry 是物品、方块和模组内容的唯一权威来源，不再使用 Python 静态别名或物品清单。
 停止后结束当前请求。最终用简短的单行中文回答，不包含 Markdown 或秘密。"""
 logger = logging.getLogger("minemate.tools")
+
+# 单次模型响应最多接受多少个工具调用；超过则视为异常批量，不执行任何调用。
+MAX_CALLS_PER_RESPONSE = 8
 
 # 只展示程序定义的失败原因，避免泛化成“失败”而丢失可操作反馈，也不转发原始错误文本。
 TOOL_FAILURE_REPLIES = {
@@ -127,8 +130,8 @@ class ToolCall(BaseModel):
     id: str = Field(min_length=1, max_length=256)
     type: str = Field(pattern=r"^function$")
     function: FunctionCall
-    # 单调用响应可能附带序号；只接受 0，序号不回传给模型。
-    index: int = Field(default=0, ge=0, le=0, exclude=True)
+    # 批量响应会带 0..N 的序号；只作为供应商元数据，不回传给模型。
+    index: int = Field(default=0, ge=0, le=MAX_CALLS_PER_RESPONSE - 1, exclude=True)
 
     @field_validator("id")
     @classmethod
@@ -188,6 +191,7 @@ class ToolLoop:
         calls_made = 0
         calls: list = []
         call = None
+        skipped_any = False
         last_response = None
         started = time.monotonic()
         try:
@@ -200,10 +204,10 @@ class ToolLoop:
                 messages = [{"role": "system", "content": TOOL_PROMPT}, {"role": "user", "content": json.dumps({
                     "player": request.player, "message": request.message, "world": snapshot
                 }, ensure_ascii=False)}]
-                seen, ids, results = set(), set(), []
+                ids, results = set(), []
                 terminal = False
                 for index in range(self.settings.tool_max_calls + 1):
-                    final = terminal or index == self.settings.tool_max_calls
+                    final = terminal or calls_made >= self.settings.tool_max_calls
                     response = await self.llm.tool_completion(messages, tools, final=final)
                     last_response = response
                     stage = "MODEL_MESSAGE"
@@ -240,56 +244,90 @@ class ToolLoop:
                                 reply = TOOL_FAILURE_REPLIES.get(result["error"].get("code"), reply)
                         if final and not terminal and len(results) >= self.settings.tool_max_calls:
                             reply = "本次工具调用已达到上限；已完成的步骤请以游戏状态为准。"
+                        if skipped_any:
+                            # 同批后续调用没有执行，不能用模型回复暗示它们已完成。
+                            reply = "前序操作未完成，同批后续调用未执行；请查询游戏状态后再继续。"
                         logger.info("[Tools] 回复完成 calls=%d reply_len=%d elapsed_ms=%d",
                                     calls_made, len(reply), int((time.monotonic() - started) * 1000))
                         return {"intent": "conversation", "arguments": {}, "reply": redact(reply, self.settings.llm_api_key)}
                     if final:
                         raise LLMError(409, "TOOL_CALL_LIMIT", "本次工具调用已结束或达到上限。")
                     stage = "PARALLEL_TOOL_CALLS"
-                    if len(calls) != 1:
-                        raise ToolOutputError("PARALLEL_TOOL_CALLS", "parallel calls rejected",
-                                              count=len(calls), names=call_names(calls),
-                                              calls=call_shape(calls),
+                    if len(calls) > MAX_CALLS_PER_RESPONSE:
+                        raise ToolOutputError("PARALLEL_TOOL_CALLS", "batch too large",
+                                              count=len(calls), limit=MAX_CALLS_PER_RESPONSE,
+                                              names=call_names(calls), calls=call_shape(calls),
                                               preview=diagnostics.model_preview(calls, secrets))
-                    stage = "TOOL_CALL_FORMAT"
-                    call = ToolCall.model_validate(calls[0])
-                    name = call.function.name
-                    stage = "ARGUMENTS_JSON"
-                    arguments = parse_arguments(call.function.arguments)
-                    fingerprint = json.dumps([name, arguments], sort_keys=True)
-                    stage = "UNKNOWN_TOOL"
-                    if name not in catalog:
-                        raise ToolOutputError("UNKNOWN_TOOL", "unregistered tool", tool=name, catalog_size=len(catalog),
-                                              arguments_preview=diagnostics.model_preview(arguments, secrets))
-                    stage = "DUPLICATE_TOOL_CALL"
-                    if call.id in ids or fingerprint in seen:
-                        raise ToolOutputError("DUPLICATE_TOOL_CALL", "repeated call", tool=name,
-                                              same_id=call.id in ids, same_arguments=fingerprint in seen,
-                                              arguments_preview=diagnostics.model_preview(arguments, secrets))
-                    stage = "ARGUMENTS_SCHEMA"
-                    if not validate(catalog[name]["parameters"], arguments):
-                        raise ToolOutputError("ARGUMENTS_SCHEMA", "invalid parameters", tool=name,
-                                              schema=schema_problem(catalog[name]["parameters"], arguments),
-                                              arguments_preview=diagnostics.model_preview(arguments, secrets))
-                    seen.add(fingerprint)
-                    ids.add(call.id)
+                    remaining = self.settings.tool_max_calls - calls_made
+                    if len(calls) > remaining:
+                        logger.warning("[Tools] 批量调用超出剩余预算 count=%d remaining=%d calls=%d",
+                                       len(calls), remaining, calls_made)
+                        raise LLMError(409, "TOOL_CALL_LIMIT", "本次工具调用已达到上限；已有步骤请以游戏状态为准。")
+                    # 先校验整批，避免执行到一半才发现后续调用非法；整批通过后才真正执行。
+                    parsed: list[tuple[ToolCall, str, dict]] = []
+                    batch_ids: set[str] = set()
+                    for raw in calls:
+                        stage = "TOOL_CALL_FORMAT"
+                        current = ToolCall.model_validate(raw)
+                        call = current
+                        name = current.function.name
+                        stage = "ARGUMENTS_JSON"
+                        arguments = parse_arguments(current.function.arguments)
+                        stage = "UNKNOWN_TOOL"
+                        if name not in catalog:
+                            raise ToolOutputError("UNKNOWN_TOOL", "unregistered tool", tool=name, catalog_size=len(catalog),
+                                                  arguments_preview=diagnostics.model_preview(arguments, secrets))
+                        stage = "DUPLICATE_TOOL_CALL"
+                        # 只拒绝相同 tool_call_id；成功后的相同动作可以重复执行，由总调用预算兜底。
+                        if current.id in ids or current.id in batch_ids:
+                            raise ToolOutputError("DUPLICATE_TOOL_CALL", "duplicate call id", tool=name,
+                                                  call_id_len=len(current.id),
+                                                  arguments_preview=diagnostics.model_preview(arguments, secrets))
+                        stage = "ARGUMENTS_SCHEMA"
+                        if not validate(catalog[name]["parameters"], arguments):
+                            raise ToolOutputError("ARGUMENTS_SCHEMA", "invalid parameters", tool=name,
+                                                  schema=schema_problem(catalog[name]["parameters"], arguments),
+                                                  arguments_preview=diagnostics.model_preview(arguments, secrets))
+                        batch_ids.add(current.id)
+                        parsed.append((current, name, arguments))
+                    if len(parsed) > 1:
+                        logger.info("[Tools] 批量工具调用 count=%d names=%s",
+                                    len(parsed), ",".join(item[1] for item in parsed))
                     # 玩家身份来自请求，由程序传递，不接受模型指定另一名玩家。
-                    messages.append({"role": "assistant", "content": None, "tool_calls": [call.model_dump()]})
-                    executing = True
-                    request_id = uuid.uuid4().hex
-                    calls_made += 1
-                    stage = "TOOL_EXECUTE"
-                    tool_started = time.monotonic()
-                    result = await self.client.execute(name, arguments, request.player, request_id, generation)
-                    executing = False
-                    pending_action = result["success"] and result["data"].get("status") == "pending"
-                    error_code = (result.get("error") or {}).get("code") if not result["success"] else None
-                    logger.info("[Tools] 工具结果 tool=%s success=%s status=%s error=%s elapsed_ms=%d calls=%d",
-                                name, result["success"], result["data"].get("status") if result["data"] else None,
-                                error_code or "-", int((time.monotonic() - tool_started) * 1000), calls_made)
-                    results.append(result)
-                    messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(result, ensure_ascii=False)})
-                    terminal = not result["success"] or result["data"].get("status") in ("pending", "uncertain") or name == "stop_movement"
+                    messages.append({"role": "assistant", "content": None,
+                                     "tool_calls": [item[0].model_dump() for item in parsed]})
+                    terminal = False
+                    for position, (current, name, arguments) in enumerate(parsed):
+                        ids.add(current.id)
+                        executing = True
+                        request_id = uuid.uuid4().hex
+                        calls_made += 1
+                        stage = "TOOL_EXECUTE"
+                        tool_started = time.monotonic()
+                        result = await self.client.execute(name, arguments, request.player, request_id, generation)
+                        executing = False
+                        pending_action = result["success"] and result["data"].get("status") == "pending"
+                        error_code = (result.get("error") or {}).get("code") if not result["success"] else None
+                        logger.info("[Tools] 工具结果 tool=%s success=%s status=%s error=%s elapsed_ms=%d calls=%d",
+                                    name, result["success"], result["data"].get("status") if result["data"] else None,
+                                    error_code or "-", int((time.monotonic() - tool_started) * 1000), calls_made)
+                        results.append(result)
+                        messages.append({"role": "tool", "tool_call_id": current.id,
+                                         "content": json.dumps(result, ensure_ascii=False)})
+                        terminal = (not result["success"]
+                                    or result["data"].get("status") in ("pending", "uncertain")
+                                    or name == "stop_movement")
+                        if terminal:
+                            # 同一批中后续调用不再执行；补一条明确的未执行结果，保持 tool_calls 与 tool 消息配对。
+                            for skipped_call, skipped_name, _ in parsed[position + 1:]:
+                                skipped_any = True
+                                logger.warning("[Tools] 前序操作未完成，跳过工具 tool=%s request=%s",
+                                               skipped_name, request_id)
+                                skipped = {"success": False, "tool": skipped_name, "data": None,
+                                           "error": {"code": "NOT_EXECUTED", "message": "前序操作未完成，未执行此调用。"}}
+                                messages.append({"role": "tool", "tool_call_id": skipped_call.id,
+                                                 "content": json.dumps(skipped, ensure_ascii=False)})
+                            break
                 raise LLMError(409, "TOOL_CALL_LIMIT", "工具调用达到上限。")
         except asyncio.CancelledError:
             logger.info("[Tools] 请求被取消 stage=%s executing=%s pending=%s calls=%d", stage, executing, pending_action, calls_made)

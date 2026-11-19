@@ -194,7 +194,7 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_call_metadata_is_rejected_with_safe_field_diagnostics(self):
         cases = [({"id": ""}, "ID:EMPTY"), ({"id": "unit-secret\n"}, "ID:INVALID"),
-                 ({"id": "x" * 257}, "ID:TOO_LONG"), ({"index": 1}, "INDEX:RANGE"),
+                 ({"id": "x" * 257}, "ID:TOO_LONG"), ({"index": 8}, "INDEX:RANGE"),
                  ({"index": True}, "INDEX:TYPE"), ({"unit-secret": "sensitive"}, "OTHER:EXTRA_FIELD"),
                  ({"function": {"name": "demo", "arguments": None}}, "FUNCTION_ARGUMENTS:TYPE"),
                  ({"function": {"name": "functions.demo", "arguments": "{}"}}, "FUNCTION_NAME:PATTERN")]
@@ -237,16 +237,55 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(llm.tool_completion.await_args.kwargs["final"])
             self.assertEqual(client.execute.await_count, 1)
 
-    async def test_call_count_limit_and_repeated_calls(self):
+    async def test_call_count_limit_and_duplicate_call_id(self):
         loop, llm, client = self.fixture([call(), call(identity="call2")], tool_max_calls=1)
         with self.assertRaises(LLMError) as error:
             await loop.run(REQUEST)
         self.assertEqual(error.exception.code, "TOOL_CALL_LIMIT")
         self.assertEqual(client.execute.await_count, 1)
-        loop, _, client = self.fixture([call(), call(identity="call2")])
-        with self.assertRaises(LLMError):
+        # 相同 tool_call_id 是协议级重复；相同参数但不同 ID 允许成功后再执行（如连续跳跃）。
+        loop, _, client = self.fixture([call(), call(identity="call1")])
+        with self.assertRaises(LLMError) as error:
             await loop.run(REQUEST)
+        self.assertEqual(error.exception.code, "INVALID_TOOL_CALL")
         self.assertEqual(client.execute.await_count, 1)
+
+    async def test_repeated_successful_tool_calls_are_allowed_across_turns(self):
+        jump = call("jump", {}, identity="call1")
+        jump_again = call("jump", {}, identity="call2")
+        loop, llm, client = self.fixture([
+            jump,
+            jump_again,
+            {"content": "跳了两下。"},
+        ])
+        empty = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+        client.catalog.return_value = ({"jump": {"name": "jump", "description": "跳", "parameters": empty}}, 7)
+        client.execute.side_effect = [
+            {"success": True, "tool": "jump", "data": {"status": "completed"}, "error": None},
+            {"success": True, "tool": "jump", "data": {"status": "completed"}, "error": None},
+        ]
+        result = await loop.run(REQUEST)
+        self.assertEqual(result["reply"], "跳了两下。")
+        self.assertEqual(client.execute.await_count, 2)
+        self.assertEqual([item.args[0] for item in client.execute.await_args_list], ["jump", "jump"])
+
+    async def test_repeated_successful_tool_calls_are_allowed_in_one_batch(self):
+        first = call("jump", {}, identity="call1")
+        second = call("jump", {}, identity="call2")
+        second["tool_calls"][0]["index"] = 1
+        loop, llm, client = self.fixture([
+            {"tool_calls": first["tool_calls"] + second["tool_calls"]},
+            {"content": "跳了两下。"},
+        ])
+        empty = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+        client.catalog.return_value = ({"jump": {"name": "jump", "description": "跳", "parameters": empty}}, 7)
+        client.execute.side_effect = [
+            {"success": True, "tool": "jump", "data": {"status": "completed"}, "error": None},
+            {"success": True, "tool": "jump", "data": {"status": "completed"}, "error": None},
+        ]
+        result = await loop.run(REQUEST)
+        self.assertEqual(result["reply"], "跳了两下。")
+        self.assertEqual(client.execute.await_count, 2)
 
     async def test_total_timeout_and_task_cancellation_cancel_node(self):
         for cancel in (False, True):
@@ -294,7 +333,7 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
         bad_json["tool_calls"][0]["function"]["arguments"] = "unit-secret"
         for response, reason in [
             ({"tool_calls": "unit-secret"}, "TOOL_CALL_LIST"),
-            (dict(call(), tool_calls=call()["tool_calls"] * 2), "PARALLEL_TOOL_CALLS"),
+            (dict(call(), tool_calls=call()["tool_calls"] * 9), "PARALLEL_TOOL_CALLS"),
             (call("unit_secret"), "UNKNOWN_TOOL"),
             (call(arguments={"x": 1, "secret": "unit-secret"}), "ARGUMENTS_SCHEMA"),
             (bad_json, "ARGUMENTS_JSON"),
@@ -310,23 +349,65 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("preview=", " ".join(captured.output))
             client.execute.assert_not_awaited()
 
-    async def test_parallel_call_diagnostic_includes_count_and_tool_names(self):
-        first, second = call(), call(identity="call2")
-        loop, _, client = self.fixture([{"tool_calls": first["tool_calls"] + second["tool_calls"]}])
+    async def test_oversized_batch_is_rejected_with_count_and_names(self):
+        response = {"tool_calls": call()["tool_calls"] * 9}
+        loop, _, client = self.fixture([response])
         with self.assertLogs("minemate.tools", level="WARNING") as captured:
             with self.assertRaises(LLMError):
                 await loop.run(REQUEST)
         logs = " ".join(captured.output)
         self.assertIn("code=PARALLEL_TOOL_CALLS", logs)
-        self.assertIn("count=2", logs)
-        self.assertIn("names=demo,demo", logs)
+        self.assertIn("count=9", logs)
+        self.assertIn("limit=8", logs)
+        self.assertIn("names=demo,demo,demo,demo,demo,demo", logs)
         client.execute.assert_not_awaited()
+
+    async def test_multiple_valid_calls_execute_sequentially(self):
+        first = call(arguments={"x": 1})
+        second = call(arguments={"x": 2}, identity="call2")
+        second["tool_calls"][0]["index"] = 1
+        loop, llm, client = self.fixture([
+            {"tool_calls": first["tool_calls"] + second["tool_calls"]},
+            {"content": "两个查询都完成了。"},
+        ])
+        client.execute.side_effect = [
+            {"success": True, "tool": "demo", "data": {"status": "completed"}, "error": None},
+            {"success": True, "tool": "demo", "data": {"status": "completed"}, "error": None},
+        ]
+        result = await loop.run(REQUEST)
+        self.assertEqual(result["reply"], "两个查询都完成了。")
+        self.assertEqual([item.args[:2] for item in client.execute.await_args_list],
+                         [("demo", {"x": 1}), ("demo", {"x": 2})])
+        history = llm.tool_completion.await_args.args[0]
+        assistant = [item for item in history if item["role"] == "assistant"][-1]
+        self.assertEqual([item["id"] for item in assistant["tool_calls"]], ["call1", "call2"])
+        tool_messages = [item for item in history if item["role"] == "tool"]
+        self.assertEqual([item["tool_call_id"] for item in tool_messages], ["call1", "call2"])
+
+    async def test_batch_stops_after_pending_and_marks_remaining_not_executed(self):
+        first = call(arguments={"x": 1})
+        second = call(arguments={"x": 2}, identity="call2")
+        loop, llm, client = self.fixture([
+            {"tool_calls": first["tool_calls"] + second["tool_calls"]},
+            {"content": "已启动。"},
+        ])
+        client.execute.side_effect = [
+            {"success": True, "tool": "demo", "data": {"status": "pending"}, "error": None},
+            {"success": True, "tool": "demo", "data": {"status": "completed"}, "error": None},
+        ]
+        result = await loop.run(REQUEST)
+        self.assertIn("前序操作未完成", result["reply"])
+        self.assertIn("未执行", result["reply"])
+        self.assertEqual(client.execute.await_count, 1)
+        history = llm.tool_completion.await_args.args[0]
+        tool_messages = {item["tool_call_id"]: json.loads(item["content"]) for item in history if item["role"] == "tool"}
+        self.assertEqual(tool_messages["call1"]["data"]["status"], "pending")
+        self.assertEqual(tool_messages["call2"]["error"]["code"], "NOT_EXECUTED")
 
     async def test_traceback_all_includes_call_shape_preview_and_stack(self):
         diagnostics.set_traceback_mode("all")
         try:
-            first, second = call(), call(identity="call2")
-            loop, _, client = self.fixture([{"tool_calls": first["tool_calls"] + second["tool_calls"]}])
+            loop, _, client = self.fixture([{"tool_calls": call()["tool_calls"] * 9}])
             with self.assertLogs("minemate.tools", level="WARNING") as captured:
                 with self.assertRaises(LLMError):
                     await loop.run(REQUEST)

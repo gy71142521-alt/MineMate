@@ -840,7 +840,7 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3000/api/tools/execute' -C
 
 ### 执行边界与模型兼容性
 
-- 注册表默认单工具 20 秒，最多 4 个在途请求，仅一个游戏修改操作。Python 默认最多 4 次工具调用（配置上限 8）、总时限 90 秒；保持原消息限频与并发限制。LLM 每轮只能返回一个调用。
+- 注册表默认单工具 20 秒，最多 4 个在途请求，仅一个游戏修改操作。Python 默认最多 4 次工具调用（配置上限 50）、总时限 90 秒；保持原消息限频与并发限制。模型优先每轮一个调用；若一轮返回多个，Python 按顺序串行执行，单次最多 8 个，遇到 pending/失败/uncertain 停止同批剩余调用。
 - 持续跟随不使用坐标任务 60 秒总时限；跟随启动返回 pending，工具导航默认最多等待 15 秒确认到达。沿用原移动状态与完成事件；等待期间可停止，超时仍 pending 而不虚报到达。拾取最多等待 10 秒；攻击最多 3 次，间隔 700ms，无无限追击。
 - 失败、pending、uncertain 结果会终止本轮执行，并交给模型生成回复；程序阻止其被文本改写为“全部完成”。工具循环不自动重试失败动作，也不做长期计划。
 - 停止、消息取消、断线和总超时会清理动作/窗口；取消不能撤销已经生效的挖掘、放置、攻击或存取。底层 API 若不能立即中断，先响应超时并保留互斥锁，直到原 Promise 结算；持续卡住时需重新连接 Bot。
@@ -867,14 +867,14 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3000/api/tools/execute' -C
 | `MISSING_FINISH_REASON` / `UNSUPPORTED_FINISH_REASON` | 供应商未返回预期的 stop/tool_calls 完成状态；不能视为有效完整调用 |
 | `TOOL_CALL_LIST` / `TOOL_CALL_FORMAT` | tool_calls 容器或 id/type/function 格式不合法；后者同时输出静态 `fields=...` 分类 |
 | `ARGUMENTS_JSON` / `ARGUMENTS_SCHEMA` | 参数不是合法对象 JSON，或与当前 Node Schema 不符（例如多传身份参数、字符串坐标或缺字段） |
-| `UNKNOWN_TOOL` / `DUPLICATE_TOOL_CALL` / `PARALLEL_TOOL_CALLS` | 未注册工具、重复调用或并行调用被拒绝 |
+| `UNKNOWN_TOOL` / `DUPLICATE_TOOL_CALL` / `PARALLEL_TOOL_CALLS` | 未注册工具、相同 `tool_call_id` 重复，或单次批量超过 8 个调用被整批拒绝；相同参数但不同 ID 的重复动作（如连续 `jump`）允许在调用预算内再次执行 |
 | `FINAL_REPLY` | 最终回复缺失、为空、带代码围栏/非法控制字符或超过 8192 字符；普通换行会压为单行，展示截断到 500 字符 |
 
 上述错误不能仅凭旧的通用错误码判定具体原因。调试时保留新诊断分类即可，不要上传 `.env` 或供应商原始响应。已启动动作后响应异常仍会尝试取消对应动作；若不确定当前状态，先用本地“停止”“状态”检查。
 
 工具调用解析兼容单调用的 `index: 0`（回传时删除）、1–256 字符的可见 ASCII 调用 ID（可包含冒号/点号），以及网关已解码的对象形式 arguments（先编码为 JSON，再执行相同的 Schema 校验）。不补造缺失的 ID/type/function，不移除未知业务参数，不把普通文本当作调用。非零/布尔序号、控制字符 ID、未知附加字段、非法工具名和不符合 Schema 的参数仍会被拒绝。
 
-`TOOL_CALL_FORMAT fields=ID:INVALID` 表示 ID 字符不合法；`FUNCTION_ARGUMENTS:TYPE` 表示参数既不是 JSON 字符串也不是对象；`TYPE:PATTERN` 表示调用类型不是 function；`OTHER:EXTRA_FIELD` 表示包含不支持的附加字段。日志只输出这些预定义分类，不包含实际字段值或未知字段名称；并行调用会额外输出 `count` 和合法工具名，参数 Schema 失败会输出缺失字段和多余字段数量。修正此类兼容代码后只需重启 Python，无需修改密钥或重启 Minecraft。
+`TOOL_CALL_FORMAT fields=ID:INVALID` 表示 ID 字符不合法；`FUNCTION_ARGUMENTS:TYPE` 表示参数既不是 JSON 字符串也不是对象；`TYPE:PATTERN` 表示调用类型不是 function；`OTHER:EXTRA_FIELD` 表示包含不支持的附加字段。日志只输出这些预定义分类，不包含实际字段值或未知字段名称；超大批量会额外输出 `count`、`limit` 和合法工具名，参数 Schema 失败会输出缺失字段和多余字段数量。修正此类兼容代码后只需重启 Python，无需修改密钥或重启 Minecraft。
 
 ### 自动化结果与 Minecraft 验收
 
