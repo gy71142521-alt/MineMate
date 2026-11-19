@@ -42,6 +42,23 @@ test('所有旧指令优先匹配且不调用 Agent，自身消息不会循环',
   assert.equal(state.sent.length, 9);
 });
 
+test('以 / 开头的 Minecraft 命令不转发 Agent、不回复，也不记录原文', async () => {
+  const state = fixture();
+  const sentBefore = state.sent.length;
+  state.bot.emit('chat', 'Steve', '/give Steve diamond 64');
+  state.bot.emit('chat', 'Steve', '   /login unit-secret');
+  await flush();
+  assert.equal(state.requests.length, 0);
+  assert.equal(state.sent.length, sentBefore);
+  assert.match(state.logs.join('\n'), /已忽略命令消息/);
+  assert.doesNotMatch(state.logs.join('\n'), /diamond|unit-secret/);
+  // 过滤命令后，普通消息仍应正常进入 Agent。
+  state.bot.emit('chat', 'Steve', '跟着我');
+  await flush();
+  assert.deepEqual(state.requests, [['Steve', '跟着我']]);
+  assert.equal(state.sent.length, sentBefore + 1);
+});
+
 test('待处理云端请求不会阻塞停止指令，断线/死亡/重生后丢弃迟到回复', async () => {
   for (const event of ['end', 'kicked', 'death', 'respawn']) {
     let resolve;

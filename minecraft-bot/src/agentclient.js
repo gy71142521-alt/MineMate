@@ -33,6 +33,8 @@ function createAgentClient(config = {}, { fetchImpl = fetch, clock = Date.now, l
   async function message(player, text, context = {}) {
     if (disposed || !options.enabled) return null;
     if (typeof text !== 'string' || text.length > 500 || !text.trim()) return { reply: '消息长度须为 1–500 个字符。' };
+    // 聊天层已过滤；此处作为传输边界再次拒绝，防止其他调用方误把 Minecraft 命令发给模型。
+    if (text.trimStart().startsWith('/')) return null;
     if (!/^[A-Za-z0-9_]{3,16}$/.test(player)) return null;
     const now = clock();
     if (now - windowStart >= 60000) { windowStart = now; count = 0; }

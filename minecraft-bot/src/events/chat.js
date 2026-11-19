@@ -122,13 +122,20 @@ function registerChatEvents(bot, logger = console, movement, perception, agent) 
 
   bot.on('chat', (username, message) => {
     if (username === bot.username) return;
+
+    const command = message.trim();
+    // Minecraft 命令只应由服务端处理；不转发给 Agent，也不记录原文，避免 /login 等命令进入日志。
+    if (command.startsWith('/')) {
+      logger.log(`[Chat] ${username}: 已忽略命令消息`);
+      return;
+    }
+
     const logMessage = message.replace(/\bsk-[A-Za-z0-9_-]+/gu, '[已隐藏]')
       .replace(/((?:api[_-]?key|access[_-]?token|password)\s*[:=]\s*)\S+/giu, '$1[已隐藏]')
       .replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 500);
     logger.log(`[Chat] ${username}: ${logMessage}`);
     if (!ready) return;
 
-    const command = message.trim();
     if (command === '你好') {
       send(`你好，${username}！很高兴和你一起玩 Minecraft。`);
     } else if (command === '状态') {
