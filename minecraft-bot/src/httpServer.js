@@ -117,10 +117,20 @@ function createApiServer({ bot, movement, perception, tools = bot?.tools, getSta
       }
 
       if (method === 'GET' && url.pathname === '/api/tools') {
-        sendJson(response, tools ? 200 : 503, tools ? envelope(true, { tools: tools.list(), generation: tools.getState().generation }) : errorBody('TOOLS_UNAVAILABLE', '工具系统尚未就绪。'));
+        sendJson(response, tools ? 200 : 503, tools ? envelope(true, { tools: tools.list(), ...tools.getState() }) : errorBody('TOOLS_UNAVAILABLE', '工具系统尚未就绪。'));
         return;
       }
-      if (method === 'POST' && ['/api/tools/execute', '/api/tools/cancel'].includes(url.pathname)) {
+      if (method === 'GET' && url.pathname.startsWith('/api/tools/requests/')) {
+        const requestId = url.pathname.slice('/api/tools/requests/'.length), username = url.searchParams.get('username'), instanceId = url.searchParams.get('instanceId');
+        if (!tools || !/^[A-Za-z0-9_-]{1,80}$/.test(requestId) || !validUsername(username) || !/^[a-f0-9-]{36}$/.test(instanceId ?? '') ||
+          [...url.searchParams.keys()].some((key) => !['username', 'instanceId'].includes(key))) {
+          sendJson(response, 400, errorBody('INVALID_ARGUMENT', '请求记录查询参数无效。')); return;
+        }
+        const receipt = tools.receipt(username, requestId, { instanceId });
+        sendJson(response, receipt ? 200 : 404, receipt ? envelope(true, receipt) : errorBody('REQUEST_NOT_FOUND', '请求记录不存在；不得据此推断操作未发生。'));
+        return;
+      }
+      if (method === 'POST' && ['/api/tools/execute', '/api/tools/cancel', '/api/tools/lease'].includes(url.pathname)) {
         if (!tools) { sendJson(response, 503, errorBody('TOOLS_UNAVAILABLE', '工具系统尚未就绪。')); return; }
         if (!/^application\/json(?:\s*;|$)/i.test(request.headers['content-type'] ?? '')) {
           sendJson(response, 415, errorBody('UNSUPPORTED_MEDIA_TYPE', '请求必须使用 application/json。')); return;
@@ -129,12 +139,30 @@ function createApiServer({ bot, movement, perception, tools = bot?.tools, getSta
         try { body = await readJson(request, maxBodyBytes); }
         catch (error) { sendJson(response, error.code === 'BODY_TOO_LARGE' ? 413 : 400, errorBody(error.code === 'BODY_TOO_LARGE' ? 'BODY_TOO_LARGE' : 'INVALID_JSON', '请求体过大或 JSON 无效。')); return; }
         const cancelling = url.pathname.endsWith('/cancel');
-        if (!hasOnlyKeys(body, cancelling ? ['username', 'requestId'] : ['username', 'tool', 'arguments', 'requestId', 'generation']) || !validUsername(body.username) ||
+        const leasing = url.pathname.endsWith('/lease');
+        if (leasing) {
+          if (!hasOnlyKeys(body, ['username', 'action', 'instanceId', 'leaseId', 'generation']) || !validUsername(body.username) ||
+            !['acquire', 'heartbeat', 'release'].includes(body.action) || !Number.isInteger(body.generation) || !/^[a-f0-9-]{36}$/.test(body.instanceId ?? '') ||
+            (body.leaseId !== undefined && !/^[a-f0-9-]{36}$/.test(body.leaseId))) {
+            sendJson(response, 400, errorBody('INVALID_ARGUMENT', '租约请求格式无效。')); return;
+          }
+          sendJson(response, 200, envelope(true, tools.lease(body.action, body.username, body))); return;
+        }
+        if (!hasOnlyKeys(body, cancelling ? ['username', 'requestId', 'instanceId', 'leaseId', 'generation'] : ['username', 'tool', 'arguments', 'requestId', 'generation', 'instanceId', 'leaseId']) || !validUsername(body.username) ||
+          (body.instanceId !== undefined && !/^[a-f0-9-]{36}$/.test(body.instanceId)) ||
+          (body.leaseId !== undefined && !/^[a-f0-9-]{36}$/.test(body.leaseId)) ||
           (cancelling && body.requestId !== undefined && (typeof body.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(body.requestId))) ||
           (!cancelling && (typeof body.tool !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(body.tool) || typeof body.requestId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(body.requestId) || !Number.isInteger(body.generation)))) {
           sendJson(response, 400, errorBody('INVALID_ARGUMENT', '工具请求格式无效。')); return;
         }
         if (cancelling) {
+          // 后台任务的迟到清理必须匹配原实例和租约，不能停止后来创建的任务。
+          if (body.instanceId !== undefined || body.leaseId !== undefined) {
+            const current = tools.getState();
+            if (body.instanceId !== current.instanceId || !body.leaseId || body.leaseId !== current.lease?.leaseId || body.generation !== current.generation) {
+              sendJson(response, 409, errorBody('STALE_TASK', '原任务控制权已失效，忽略迟到取消。')); return;
+            }
+          }
           const ok = tools.cancel(body.username, false, body.requestId);
           if (ok && !body.requestId) movement?.stop(body.username);
           sendJson(response, ok ? 200 : 403, ok ? envelope(true, { status: 'cancelled' }) : errorBody('FORBIDDEN', '无权取消操作。'));
@@ -144,7 +172,7 @@ function createApiServer({ bot, movement, perception, tools = bot?.tools, getSta
           sendJson(response, 409, errorBody('STALE_TASK', '任务已被停止或生命周期变化取消。')); return;
         }
         // 工具失败属于真实执行结果，保持 HTTP 200 和完整工具信封，供模型读取。
-        const result = await tools.execute(body.tool, body.arguments, body.username, body.requestId);
+        const result = await tools.execute(body.tool, body.arguments, body.username, body.requestId, { instanceId: body.instanceId, leaseId: body.leaseId });
         sendJson(response, 200, envelope(true, result));
         return;
       }
@@ -191,7 +219,10 @@ function createApiServer({ bot, movement, perception, tools = bot?.tools, getSta
       }
 
       sendJson(response, 404, errorBody('NOT_FOUND', '接口不存在。'));
-    } catch {
+    } catch (error) {
+      if (error instanceof require('./tools/common').ToolError) {
+        sendJson(response, error.code === 'FORBIDDEN' ? 403 : 409, errorBody(error.code, error.message)); return;
+      }
       logger.error('[HTTP] 请求处理失败。');
       if (!response.headersSent) sendJson(response, 500, errorBody('INTERNAL_ERROR', '请求处理失败。'));
     }

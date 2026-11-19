@@ -1,5 +1,7 @@
 # MineMate Minecraft LAN Bot
 
+> Planning 前置衔接已新增后台执行接口和 4 个查询工具（注册目录共 34 项）。详见 [接口、示例及验收说明](../docs/tasks/task007-preparation.md)。本次不生成 LLM 计划，原 Task 006 消息循环保留原有请求时限；长任务请提交新后台 API。
+
 > Task 006 的新工具系统说明见本文末尾；此前 Task 001～005 各节保留阶段历史。
 
 > 临时测试界面：在项目根目录双击 `start-minemate.cmd`，可一键启动/停止 Node 和 Python，并分别查看实时日志。前置配置与使用限制见 [启动器说明](../README.md#临时测试启动器windows)。

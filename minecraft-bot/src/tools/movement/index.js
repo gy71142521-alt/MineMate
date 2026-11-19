@@ -39,6 +39,14 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
   let task = null;
   let ready = false;
   let disposed = false;
+  const history = new Map();
+
+  function remember(current, status, message = null) {
+    history.set(current.taskId, { taskId: current.taskId, type: current.type, username: current.username,
+      target: current.target ? { ...current.target } : null, status, message,
+      startedAt: current.startedAt, updatedAt: Date.now() });
+    while (history.size > 128) history.delete(history.keys().next().value);
+  }
 
   function result(ok, status, message, username, taskId = null) {
     return { ok, status, message, username, taskId };
@@ -75,7 +83,10 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
     const previous = task;
     // 必须先清除任务再触发插件事件，避免同步的 goal_updated 误判任务。
     task = null;
-    if (previous) clearInterval(previous.timer);
+    if (previous) {
+      clearInterval(previous.timer);
+      remember(previous, 'cancelled', '移动任务已取消或被替换。');
+    }
     return previous;
   }
 
@@ -103,6 +114,7 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
       message = '移动任务已结束，但清理寻路控制失败，请检查终端日志。';
     }
     logger.log(`[Movement] ${message}`);
+    remember(current, status, message);
     controller.emit('result', result(ok, status, message, current.username, current.taskId));
   }
 
@@ -169,6 +181,7 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
       checkpoint: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z }
     };
     task = current;
+    remember(current, 'running');
     try {
       bot.pathfinder.setGoal(goal, type === 'follow');
       controls.applyModes();
@@ -178,6 +191,7 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
       return result(true, type, message, username, current.taskId);
     } catch {
       cancel();
+      remember(current, 'failed', '设置移动目标失败。');
       logger.error('[Movement] 设置移动目标失败。');
       return result(false, 'failed', '设置移动目标失败，已取消移动。', username);
     }
@@ -329,6 +343,8 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
       return denied ? Promise.resolve(denied) : controls.startJump(username, signal);
     },
     getMotionState: () => controls.state(),
+    // 查询副本；停止后仍保留终态，不把 idle 误认为成功到达。
+    getTask: (taskId) => history.has(taskId) ? structuredClone(history.get(taskId)) : null,
     getState: () => ({ type: task?.type ?? 'idle', username: task?.username ?? null, taskId: task?.taskId ?? null })
   });
   bot.loadPlugin(pathfinder);

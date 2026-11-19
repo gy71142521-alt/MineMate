@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import suppress
+from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable
 
 from fastapi import FastAPI, Request
@@ -14,10 +15,21 @@ from .llm_client import LLMClient, LLMError
 from .message_handler import MessageHandler
 from .tool_client import ToolClient
 from .tool_loop import ToolLoop
+from .execution.manager import TaskManager
+from .execution.models import TaskRequest
 
 
 settings = load_settings()
-app = FastAPI(title="MineMate Agent", version="0.1.0")
+task_manager = TaskManager(ToolClient(settings))
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    yield
+    await task_manager.close()
+
+
+app = FastAPI(title="MineMate Agent", version="0.1.0", lifespan=lifespan)
 client = NodeClient(settings)
 llm_client = LLMClient(settings)
 message_handler = MessageHandler(settings, llm_client, tool_loop=ToolLoop(settings, llm_client, ToolClient(settings)))
@@ -35,6 +47,38 @@ def failure(code: str, message: str) -> dict[str, Any]:
 async def validation_error(_request, _error) -> JSONResponse:
     # FastAPI 默认会返回另一种结构，这里统一为通信协议格式。
     return JSONResponse(status_code=422, content=failure("INVALID_ARGUMENT", "请求参数无效。"))
+
+
+@app.exception_handler(LLMError)
+async def service_error(_request, error: LLMError) -> JSONResponse:
+    return JSONResponse(status_code=error.status_code, content=failure(error.code, error.message))
+
+
+@app.post("/api/agent/tasks", status_code=202)
+async def submit_task(request: Request) -> JSONResponse:
+    # 后台请求也限制流式请求体，不能只相信 Content-Length。
+    from pydantic import ValidationError
+    import json
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 16384:
+            return JSONResponse(status_code=413, content=failure("BODY_TOO_LARGE", "任务请求不能超过 16 KiB。"))
+    try:
+        task = TaskRequest.model_validate(json.loads(raw))
+    except (ValidationError, ValueError, TypeError, RecursionError):
+        return JSONResponse(status_code=422, content=failure("INVALID_ARGUMENT", "任务参数无效。"))
+    return JSONResponse(status_code=202, content=success(await task_manager.submit(task)))
+
+
+@app.get("/api/agent/tasks/{task_id}")
+async def task_status(task_id: str, player: str) -> dict:
+    return success(task_manager.view(task_id, player))
+
+
+@app.post("/api/agent/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str, request: MovementRequest) -> dict:
+    return success(await task_manager.cancel(task_id, request.username))
 
 
 async def forward(call: Callable[[], Awaitable[dict[str, Any]]]) -> JSONResponse:

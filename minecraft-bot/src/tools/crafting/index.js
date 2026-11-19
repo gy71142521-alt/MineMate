@@ -76,3 +76,6 @@ function registerCrafting(registry) {
 
 }
 module.exports = registerCrafting;
+// 只读配方查询复用同一份加工能力定义，不在 Python 复制白名单。
+module.exports.SMELTING = SMELTING;
+module.exports.FUEL = FUEL;

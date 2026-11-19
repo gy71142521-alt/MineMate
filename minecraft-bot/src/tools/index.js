@@ -21,6 +21,9 @@ function createToolSystem(bot, options = {}) {
     parameters: object({ x: number(-29999984, 29999984), y: number(-2048, 2047), z: number(-29999984, 29999984), wait_seconds: number(0, 15) }, ['x', 'y', 'z']), movement: true, compatibleControls: true,
     execute: navigate });
   require('./movement/tools')(registry);
+  require('./movement/queries')(registry);
+  require('./movement/standing')(registry);
+  require('./crafting/recipes')(registry);
   registry.register({ name: 'stop_movement', description: '最高优先级：取消正在执行的工具并停止移动。', parameters: object(), priority: true,
     execute: ({ movement, username }) => movementResult(movement.stop(username), false) });
   // 各功能模块仅注册定义；所有实例共享同一 Bot 与调度器。

@@ -54,6 +54,41 @@ function setup(t, { ownerUsername = '', pathfinding, realPlugin = false, spawn =
 
 const flushEvents = () => new Promise((resolve) => queueMicrotask(resolve));
 
+test('移动终态可按原 ID 查询：到达、失败、替换、停止与断线均不误报', async (t) => {
+  const { bot, movement } = setup(t);
+  const first = movement.goTo('Steve', 3, 64, 0);
+  assert.equal(movement.getTask(first.taskId).status, 'running');
+  const firstGoal = bot.pathfinder.goal;
+  bot.emit('goal_reached', firstGoal);
+  await flushEvents();
+  assert.equal(movement.getTask(first.taskId).status, 'arrived');
+  const following = movement.follow('Steve');
+  const next = movement.goTo('Steve', 4, 64, 0);
+  bot.emit('goal_reached', firstGoal); await flushEvents();
+  assert.equal(movement.getTask(following.taskId).status, 'cancelled');
+  assert.equal(movement.getTask(next.taskId).status, 'running');
+  bot.emit('path_update', { status: 'noPath' }); await flushEvents();
+  assert.equal(movement.getTask(next.taskId).status, 'no_path');
+  const stopped = movement.goTo('Steve', 5, 64, 0);
+  movement.stop('Steve');
+  assert.equal(movement.getTask(stopped.taskId).status, 'cancelled');
+  const ended = movement.follow('Steve'); bot.emit('end');
+  assert.equal(movement.getTask(ended.taskId).status, 'cancelled');
+  const copy = movement.getTask(first.taskId); copy.status = 'fake';
+  assert.equal(movement.getTask(first.taskId).status, 'arrived');
+});
+
+test('移动历史有上限；死亡和维度切换取消历史任务，保留旧 getState 结构', (t) => {
+  const { bot, movement } = setup(t);
+  const first = movement.follow('Steve');
+  for (let i = 0; i < 130; i++) movement.goTo('Steve', 5, 64, 0);
+  assert.equal(movement.getTask(first.taskId), null);
+  const current = movement.getState().taskId;
+  bot.emit('respawn');
+  assert.equal(movement.getTask(current).status, 'cancelled');
+  assert.deepEqual(movement.getState(), { type: 'idle', username: null, taskId: null });
+});
+
 test('工具等待复用原移动控制器的到达事件，不改变本地导航或泄漏监听器', async (t) => {
   const { bot, movement } = setup(t);
   const { createToolSystem } = require('../src/tools');

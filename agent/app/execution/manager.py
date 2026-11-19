@@ -1,0 +1,275 @@
+import asyncio
+import copy
+import json
+import logging
+import time
+import uuid
+from contextlib import suppress
+from typing import Any
+
+from ..llm_client import LLMError
+from ..tool_client import ToolClient, validate
+from .models import TaskRequest
+from .references import ReferenceError, resolve, validate_template
+
+logger = logging.getLogger("minemate.execution")
+
+
+class ExecutionError(Exception):
+    def __init__(self, code: str, *, uncertain: bool = False):
+        self.code, self.uncertain = code, uncertain
+
+
+def inventory_counts(snapshot: dict) -> dict[str, int]:
+    if not isinstance(snapshot, dict) or snapshot.get("availability", {}).get("inventory") != "available":
+        raise ExecutionError("INVENTORY_UNAVAILABLE")
+    result: dict[str, int] = {}
+    for item in snapshot.get("inventory", []):
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or type(item.get("count")) is not int or item["count"] < 0:
+            raise ExecutionError("INVALID_INVENTORY")
+        result[item["name"]] = result.get(item["name"], 0) + item["count"]
+    return result
+
+
+def evidence(snapshot: dict) -> dict:
+    """账本只保存操作核对所需的自身/背包，避免每次熔炉轮询复制实体和方块列表。"""
+    return {key: copy.deepcopy(snapshot.get(key)) for key in ("timestamp", "availability", "player", "inventory")}
+
+
+class TaskManager:
+    """一个后台串行执行槽；不接收代码、不生成计划、不自动重试副作用。"""
+
+    def __init__(self, client: ToolClient, *, poll_interval: float = 2, heartbeat_interval: float = 5):
+        self.client = client
+        self.poll_interval, self.heartbeat_interval = poll_interval, heartbeat_interval
+        self.records: dict[str, dict] = {}
+        self._work: dict[str, asyncio.Task] = {}
+        self._admission = asyncio.Lock()
+        self._closed = False
+
+    async def submit(self, request: TaskRequest) -> dict:
+        async with self._admission:
+            if self._closed:
+                raise LLMError(503, "EXECUTOR_CLOSED", "后台执行器已关闭。")
+            fingerprint = json.dumps(request.model_dump(), sort_keys=True, allow_nan=False)
+            for record in self.records.values():
+                if record["player"].lower() == request.player.lower() and record["request_id"] == request.request_id:
+                    if record["fingerprint"] != fingerprint:
+                        raise LLMError(409, "REQUEST_CONFLICT", "提交 ID 已用于另一任务。")
+                    return self.view(record["task_id"])
+            if any(not work.done() for work in self._work.values()):
+                raise LLMError(409, "TASK_BUSY", "已有后台任务，请先取消后再提交。")
+            # 不驱逐记录后接受同一 ID，避免误认为全局持久幂等。重启后任务不会自动恢复。
+            if len(self.records) >= 64:
+                raise LLMError(429, "TASK_HISTORY_FULL", "本进程任务记录已满，请保存记录后重启 Agent。")
+            catalog, context = await self.client.session()
+            previous: set[str] = set()
+            try:
+                for step in request.steps:
+                    if step.tool not in catalog or not validate_template(catalog[step.tool]["parameters"], step.arguments, previous):
+                        raise ReferenceError("invalid tool")
+                    if step.tool in ("stop_movement", "follow_player"):
+                        raise ReferenceError("continuous or preemptive tool")
+                    previous.add(step.step_id)
+            except (ReferenceError, ValueError, TypeError, RecursionError):
+                raise LLMError(422, "INVALID_TASK", "步骤工具、参数或前序结果引用无效；持续跟随和停止请使用原接口。") from None
+            acquired = await self.client.lease("acquire", request.player, context)
+            context = {**context, "leaseId": acquired["lease"]["leaseId"]}
+            task_id = uuid.uuid4().hex
+            record = {"task_id": task_id, "player": request.player, "request_id": request.request_id, "status": "pending",
+                      "created_at": time.time(), "updated_at": time.time(), "steps": [], "ledger": [], "error": None,
+                      "verification": None, "fingerprint": fingerprint, "context": context, "calls": 0}
+            self.records[task_id] = record
+            self._work[task_id] = asyncio.create_task(self._run(record, request, catalog))
+            return self.view(task_id)
+
+    def view(self, task_id: str, player: str | None = None) -> dict:
+        record = self.records.get(task_id)
+        if not record or player and player.lower() != record["player"].lower():
+            raise LLMError(404, "TASK_NOT_FOUND", "没有该玩家的任务记录。")
+        return copy.deepcopy({key: value for key, value in record.items() if key not in ("fingerprint", "context")})
+
+    async def cancel(self, task_id: str, player: str) -> dict:
+        self.view(task_id, player)
+        work = self._work.get(task_id)
+        if work and not work.done():
+            work.cancel()
+            with suppress(asyncio.CancelledError):
+                await work
+            # create_task 后立即取消时，协程可能尚未进入 try/finally。
+            if self.records[task_id]["status"] == "pending":
+                record = self.records[task_id]
+                record["status"], record["error"] = "cancelled", {"code": "CANCELLED", "message": "任务尚未执行即被取消。"}
+                with suppress(LLMError):
+                    await self.client.lease("release", player, record["context"])
+        return self.view(task_id, player)
+
+    async def close(self) -> None:
+        self._closed = True
+        for work in self._work.values():
+            if not work.done():
+                work.cancel()
+        await asyncio.gather(*self._work.values(), return_exceptions=True)
+        for record in self.records.values():
+            if record["status"] == "pending":
+                record["status"] = "cancelled"
+                with suppress(LLMError):
+                    await self.client.lease("release", record["player"], record["context"])
+
+    async def _heartbeat(self, record: dict) -> None:
+        while True:
+            await asyncio.sleep(self.heartbeat_interval)
+            await self.client.lease("heartbeat", record["player"], record["context"])
+
+    async def _snapshot(self, record: dict) -> dict:
+        # 前后都检查实例/代次/租约；不能用 Node 重启后的新世界验证旧任务。
+        await self.client.lease("heartbeat", record["player"], record["context"])
+        snapshot = await self.client.request("GET", "/api/world")
+        await self.client.lease("heartbeat", record["player"], record["context"])
+        if not isinstance(snapshot, dict):
+            raise ExecutionError("INVALID_WORLD_SNAPSHOT")
+        return snapshot
+
+    async def _run(self, record: dict, request: TaskRequest, catalog: dict) -> None:
+        worker = heartbeat = None
+        try:
+            record["status"] = "running"
+            async with asyncio.timeout(request.timeout_seconds):
+                worker = asyncio.create_task(self._sequence(record, request, catalog))
+                heartbeat = asyncio.create_task(self._heartbeat(record))
+                done, _ = await asyncio.wait({worker, heartbeat}, return_when=asyncio.FIRST_COMPLETED)
+                if heartbeat in done:
+                    await heartbeat  # 租约失效立即阻断后续调用。
+                await worker
+        except asyncio.CancelledError:
+            record["status"], record["error"] = "cancelled", {"code": "CANCELLED", "message": "任务已取消；已发生的游戏操作不会回滚。"}
+        except TimeoutError:
+            record["status"], record["error"] = "uncertain", {"code": "TASK_TIMEOUT", "message": "任务超时，已请求停止；请根据现场确认已发生的操作。"}
+        except ExecutionError as error:
+            record["status"] = "uncertain" if error.uncertain else "failed"
+            record["error"] = {"code": error.code, "message": "执行未确认或条件不满足，请查看执行记录与游戏现场；未自动重试。"}
+        except LLMError as error:
+            record["status"], record["error"] = "failed", {"code": error.code, "message": "游戏服务不可用或任务控制权已失效，已停止后续调用。"}
+        except Exception:
+            record["status"], record["error"] = "uncertain", {"code": "EXECUTION_FAILED", "message": "后台执行异常，结果需要核对；未自动重试。"}
+        finally:
+            for child in (worker, heartbeat):
+                if child and not child.done():
+                    child.cancel()
+            await asyncio.gather(*(child for child in (worker, heartbeat) if child), return_exceptions=True)
+            for step in record["steps"]:
+                if step["status"] == "running":
+                    step["status"] = record["status"]
+            for entry in record["ledger"]:
+                if entry["status"] == "submitted":
+                    entry["status"] = "uncertain"
+            # 精确租约清理；旧任务清理遇到新实例/新任务会被 Node 拒绝。
+            try:
+                await self.client.lease("release", request.player, record["context"])
+            except (LLMError, ExecutionError):
+                record["cleanup"] = "lease_already_lost_or_node_unavailable"
+            record["updated_at"] = time.time()
+            logger.info("[Execution] task=%s status=%s", record["task_id"], record["status"])
+
+    async def _call(self, record: dict, request: TaskRequest, catalog: dict, name: str, arguments: dict) -> dict:
+        if name not in catalog or not validate(catalog[name]["parameters"], arguments):
+            raise ExecutionError("INVALID_ARGUMENT")
+        if record["calls"] >= request.max_tool_calls:
+            raise ExecutionError("CALL_LIMIT")
+        record["calls"] += 1
+        request_id = f'{record["task_id"]}_{record["calls"]}'
+        entry: dict[str, Any] = {"request_id": request_id, "tool": name, "arguments": copy.deepcopy(arguments),
+                                 "status": "submitted", "result": None, "before": None, "after": None}
+        record["ledger"].append(entry)
+        record["updated_at"] = time.time()
+        if catalog[name].get("mutates", True):
+            entry["before"] = evidence(await self._snapshot(record))
+        try:
+            result = await self.client.execute(name, arguments, request.player, request_id,
+                                               record["context"]["generation"], context=record["context"])
+        except LLMError as error:
+            if error.code in {"STALE_TASK", "STALE_INSTANCE", "STALE_LEASE", "FORBIDDEN", "BUSY", "BOT_NOT_READY"}:
+                entry["status"] = "rejected"
+                raise
+            # 网络断开不能推断未执行。仅查询原请求回执，不重新 POST 副作用。
+            try:
+                receipt = await self.client.receipt(request.player, request_id, record["context"]["instanceId"])
+                entry["receipt"] = receipt
+                if receipt.get("running") is not False:
+                    raise ExecutionError("UNCONFIRMED_REQUEST", uncertain=True)
+                result = ToolClient.validate_result(name, receipt.get("result"))
+            except (LLMError, ExecutionError):
+                entry["status"] = "uncertain"
+                with suppress(LLMError, ExecutionError):
+                    entry["after"] = evidence(await self._snapshot(record))
+                raise ExecutionError("UNCONFIRMED_REQUEST", uncertain=True) from None
+        entry["result"] = copy.deepcopy(result)
+        data = result.get("data") or {}
+        error_code = (result.get("error") or {}).get("code", "TOOL_FAILED")
+        if not result["success"] or data.get("status") in ("uncertain", "failed", "cancelled"):
+            uncertain = data.get("status") == "uncertain" or error_code in ("TIMEOUT", "EXECUTION_FAILED", "CANCELLED")
+            entry["status"] = "uncertain" if uncertain else "failed"
+            with suppress(LLMError, ExecutionError):
+                entry["after"] = evidence(await self._snapshot(record))
+            raise ExecutionError(error_code if not result["success"] else "UNCONFIRMED_RESULT" if uncertain else "STEP_FAILED", uncertain=uncertain)
+        entry["status"] = data.get("status", "completed")
+        return result
+
+    async def _wait(self, record: dict, request: TaskRequest, catalog: dict, step, arguments: dict, result: dict) -> dict:
+        data = result["data"]
+        if data.get("status") != "pending":
+            return result
+        deadline = asyncio.get_running_loop().time() + step.wait_seconds
+        if step.tool == "goto_position":
+            task_id = data.get("movement", {}).get("taskId")
+            if type(task_id) is not int:
+                raise ExecutionError("MISSING_MOVEMENT_ID", uncertain=True)
+            while asyncio.get_running_loop().time() < deadline:
+                current = await self._call(record, request, catalog, "get_movement_task", {"task_id": task_id})
+                if current["data"]["status"] == "completed":
+                    return current
+                if current["data"]["status"] != "pending":
+                    raise ExecutionError("NAVIGATION_FAILED")
+                await asyncio.sleep(self.poll_interval)
+        elif step.tool == "smelt_item" and arguments.get("action") == "start":
+            output, count = data.get("expectedOutput"), data.get("expectedCount")
+            if not isinstance(output, str) or type(count) is not int:
+                raise ExecutionError("INVALID_SMELTING_RESULT", uncertain=True)
+            status_args = {"position": arguments["position"], "action": "status", "item_name": output, "count": count}
+            while asyncio.get_running_loop().time() < deadline:
+                current = await self._call(record, request, catalog, "smelt_item", status_args)
+                if current["data"].get("outputReady") is True and current["data"].get("status") == "completed":
+                    return await self._call(record, request, catalog, "smelt_item", {**status_args, "action": "take"})
+                await asyncio.sleep(self.poll_interval)
+        else:
+            raise ExecutionError("UNSUPPORTED_PENDING", uncertain=True)
+        raise ExecutionError("WAIT_TIMEOUT", uncertain=True)
+
+    async def _sequence(self, record: dict, request: TaskRequest, catalog: dict) -> None:
+        before = await self._snapshot(record)
+        results: dict[str, dict] = {}
+        for step in request.steps:
+            arguments = resolve(step.arguments, results, set(results))
+            entry = {"step_id": step.step_id, "tool": step.tool, "status": "running", "result": None}
+            record["steps"].append(entry)
+            result = await self._call(record, request, catalog, step.tool, arguments)
+            try:
+                async with asyncio.timeout(step.wait_seconds):
+                    result = await self._wait(record, request, catalog, step, arguments, result)
+            except TimeoutError:
+                raise ExecutionError("WAIT_TIMEOUT", uncertain=True) from None
+            entry["status"], entry["result"] = "completed", result
+            results[step.step_id] = result
+        after = await self._snapshot(record)
+        record["verification"] = {"before": before, "after": after, "checks": [], "verified": False}
+        if request.verify_inventory:
+            initial, final = inventory_counts(before), inventory_counts(after)
+            for check in request.verify_inventory:
+                observed = final.get(check.item, 0) - (initial.get(check.item, 0) if check.mode == "increase" else 0)
+                record["verification"]["checks"].append({**check.model_dump(), "observed": observed, "passed": observed >= check.count})
+            if not all(check["passed"] for check in record["verification"]["checks"]):
+                raise ExecutionError("GOAL_NOT_VERIFIED")
+            record["verification"]["verified"] = True
+            record["status"] = "completed"
+        else:
+            record["status"] = "finished_unverified"
