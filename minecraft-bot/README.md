@@ -1,5 +1,7 @@
 # MineMate Minecraft LAN Bot
 
+> 当前能力请先看 [34 个游戏工具使用指南](../docs/tools-guide.md)，包含聊天入口、参数、执行结果、熔炉占用等限制，以及与后续 Planning 的边界。
+
 > Planning 前置衔接已新增后台执行接口和 4 个查询工具（注册目录共 34 项）。详见 [接口、示例及验收说明](../docs/tasks/task007-preparation.md)。本次不生成 LLM 计划，原 Task 006 消息循环保留原有请求时限；长任务请提交新后台 API。
 
 > Task 006 的新工具系统说明见本文末尾；此前 Task 001～005 各节保留阶段历史。

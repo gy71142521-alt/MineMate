@@ -2,6 +2,8 @@
 
 Minecraft Java Edition AI 玩伴。Node.js 负责游戏控制，Python Agent 负责模型与工具调用。详细配置、认证、接口和游戏验收见 [Minecraft Bot 文档](minecraft-bot/README.md)。
 
+查看 [现有工具使用指南](docs/tools-guide.md)：完整列出 34 个工具的能力、参数示例、前置条件、数量/距离限制、组合流程及常见错误。
+
 Planning 前置接口已补齐：移动终态、配方/交互站位查询、后台显式工具序列、熔炼续接、整任务租约和执行回执。新增接口、请求示例和游戏验收见 [Task 007 前置衔接说明](docs/tasks/task007-preparation.md)。当前尚未接入 LLM 自动计划生成或重新规划；原自然语言消息接口保持 Task 006 行为。
 
 ## 临时测试启动器（Windows）
