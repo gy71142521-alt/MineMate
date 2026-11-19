@@ -102,6 +102,17 @@ test('输入过长不请求模型，回复有固定前缀、脱敏和聊天长�
   assert.doesNotMatch(result.reply, /sk-unit-secret|\n/);
 });
 
+test('Agent 客户端在传输边界拒绝 / 开头的 Minecraft 命令', async () => {
+  let calls = 0;
+  const client = createAgentClient({}, { logger, fetchImpl: async () => {
+    calls += 1;
+    return response();
+  } });
+  assert.equal(await client.message('Steve', '/give Steve diamond 64'), null);
+  assert.equal(await client.message('Steve', '   /login unit-secret'), null);
+  assert.equal(calls, 0);
+});
+
 test('实际回环 HTTP 传输验证 Node 到 Agent 的路径、JSON 和返回结果', async (t) => {
   const calls = [];
   const server = http.createServer(async (request, res) => {
