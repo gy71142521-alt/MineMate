@@ -83,6 +83,18 @@ class LLMClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("unit-test-secret", str(error.exception))
             self.assertEqual(len(calls), 1)
 
+    async def test_provider_error_body_is_logged_redacted(self):
+        def respond(_):
+            return httpx.Response(400, text="model does not support tools; key=unit-test-secret")
+
+        with self.assertLogs("minemate.llm", level="WARNING") as logs:
+            with self.assertRaises(LLMError):
+                await LLMClient(llm_settings(), httpx.MockTransport(respond)).complete("Steve", "你好")
+        text = "\n".join(logs.output)
+        self.assertIn("status=400", text)
+        self.assertIn("model does not support tools", text)
+        self.assertNotIn("unit-test-secret", text)
+
     async def test_malformed_or_incomplete_response(self):
         for body in [{}, {"choices": []}, completion(None), completion("{}", "length"), completion("x" * 8193), completion("x" * 70000)]:
             with self.subTest(body_type=type(body)):

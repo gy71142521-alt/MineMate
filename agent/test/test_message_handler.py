@@ -108,7 +108,23 @@ class MessageHandlerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("minemate.agent", level="ERROR") as logs:
             with self.assertRaises(LLMError):
                 await handler.handle(MessageRequest(player="Alex", message="hi"))
-        self.assertNotIn("secret-value", str(logs.output))
+        text = "\n".join(logs.output)
+        self.assertIn("消息处理异常", text)
+        self.assertIn("RuntimeError", text)
+        self.assertIn("Traceback", text)
+        self.assertNotIn("secret-value", text)
+
+    async def test_llm_error_logs_code_status_and_stack(self):
+        handler, llm = self.handler(output())
+        llm.complete.side_effect = LLMError(502, "LLM_SERVER_ERROR", "模型服务暂不可用。")
+        with self.assertLogs("minemate.agent", level="ERROR") as logs:
+            with self.assertRaises(LLMError):
+                await handler.handle(MessageRequest(player="Steve", message="hi"))
+        text = "\n".join(logs.output)
+        self.assertIn("code=LLM_SERVER_ERROR", text)
+        self.assertIn("status=502", text)
+        self.assertIn("Traceback", text)
+        self.assertIn("player=Steve", text)
 
     async def test_no_game_operations_or_state_reads(self):
         with patch("app.node_client.NodeClient.request", new_callable=AsyncMock) as game:

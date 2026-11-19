@@ -205,8 +205,8 @@ function createApiServer({ bot, movement, perception, tools = bot?.tools, getSta
           if (url.pathname.endsWith('/follow')) result = movement.follow(body.username);
           else if (url.pathname.endsWith('/goto')) result = movement.goTo(body.username, body.x, body.y, body.z);
           else result = movement.stop(body.username);
-        } catch {
-          logger.error('[HTTP] 移动接口执行失败。');
+        } catch (error) {
+          logger.error('[HTTP] 移动接口执行失败。', error);
           sendJson(response, 500, errorBody('MOVEMENT_FAILED', '移动任务执行失败。'));
           return;
         }
@@ -223,7 +223,7 @@ function createApiServer({ bot, movement, perception, tools = bot?.tools, getSta
       if (error instanceof require('./tools/common').ToolError) {
         sendJson(response, error.code === 'FORBIDDEN' ? 403 : 409, errorBody(error.code, error.message)); return;
       }
-      logger.error('[HTTP] 请求处理失败。');
+      logger.error('[HTTP] 请求处理失败。', error);
       if (!response.headersSent) sendJson(response, 500, errorBody('INTERNAL_ERROR', '请求处理失败。'));
     }
   });
@@ -238,7 +238,7 @@ function startApiServer(options = {}) {
     const message = error?.code === 'EADDRINUSE'
       ? `HTTP 端口 ${port} 已被占用，请修改 HTTP_PORT。`
       : 'HTTP API 服务启动失败，请检查 HTTP_HOST 和 HTTP_PORT。';
-    logger.error(`[HTTP] ${message}`);
+    logger.error(`[HTTP] ${message}`, error);
     options.onError?.(error);
   });
   server.listen(port, host, () => {

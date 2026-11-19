@@ -1,13 +1,19 @@
 import asyncio
 import json
+import logging
 import math
 import re
+import time
 from typing import Any
 
 import httpx
 
+from . import diagnostics
 from .config import Settings
 from .llm_client import LLMError
+
+
+logger = logging.getLogger("minemate.tool_client")
 
 
 def validate(schema: dict, value: Any) -> bool:
@@ -50,6 +56,7 @@ class ToolClient:
         self.transport = transport
 
     async def request(self, method: str, path: str, payload: dict | None = None) -> Any:
+        started = time.monotonic()
         try:
             async with asyncio.timeout(self.settings.tool_api_timeout):
                 async with httpx.AsyncClient(base_url=self.settings.node_api_url, timeout=self.settings.tool_api_timeout,
@@ -63,16 +70,32 @@ class ToolClient:
                         body = json.loads(raw)
                         if response.status_code != 200 or not isinstance(body, dict) or body.get("success") is not True or body.get("error") is not None:
                             code = body.get("error", {}).get("code") if isinstance(body, dict) and isinstance(body.get("error"), dict) else None
+                            logger.warning("[Tools] Node 拒绝请求 method=%s path=%s status=%d code=%s bytes=%d elapsed_ms=%d",
+                                           method, path, response.status_code, code or "-", len(raw),
+                                           int((time.monotonic() - started) * 1000))
                             if code in {"STALE_TASK", "STALE_INSTANCE", "STALE_LEASE", "FORBIDDEN", "BUSY", "BOT_NOT_READY", "REQUEST_NOT_FOUND"}:
                                 raise LLMError(response.status_code, code, "Node 游戏控制状态已变化或请求被拒绝。")
                             raise LLMError(502, "NODE_TOOL_ERROR", "Node 工具服务拒绝请求，可能已停止或状态已变化。")
+                        logger.debug("[Tools] Node 请求完成 method=%s path=%s status=%d bytes=%d elapsed_ms=%d",
+                                     method, path, response.status_code, len(raw),
+                                     int((time.monotonic() - started) * 1000))
                         return body["data"]
-        except (TimeoutError, httpx.TimeoutException):
-            raise LLMError(504, "TOOL_API_TIMEOUT", "游戏工具请求超时，结果尚未确认，请查询状态。") from None
-        except httpx.RequestError:
-            raise LLMError(503, "NODE_UNAVAILABLE", "无法连接 Node 游戏工具服务。") from None
-        except (ValueError, TypeError, KeyError):
-            raise LLMError(502, "INVALID_TOOL_RESPONSE", "游戏工具响应格式无效。") from None
+        except LLMError:
+            raise
+        except (TimeoutError, httpx.TimeoutException) as error:
+            logger.warning("[Tools] Node 请求超时 method=%s path=%s timeout=%.1fs elapsed_ms=%d",
+                           method, path, self.settings.tool_api_timeout, int((time.monotonic() - started) * 1000))
+            raise LLMError(504, "TOOL_API_TIMEOUT", "游戏工具请求超时，结果尚未确认，请查询状态。") from error
+        except httpx.RequestError as error:
+            # 不记录底层异常的 message/URL：其中可能夹带凭据或主机细节；错误类型足以定位连接问题。
+            logger.warning("[Tools] Node 连接失败 method=%s path=%s error=%s",
+                           method, path, type(error).__name__)
+            raise LLMError(503, "NODE_UNAVAILABLE", "无法连接 Node 游戏工具服务。") from error
+        except (ValueError, TypeError, KeyError) as error:
+            logger.warning("[Tools] Node 响应无效 method=%s path=%s error=%s detail=%s",
+                           method, path, type(error).__name__,
+                           diagnostics.safe_text(error, (self.settings.llm_api_key,), 240))
+            raise LLMError(502, "INVALID_TOOL_RESPONSE", "游戏工具响应格式无效。") from error
 
     async def catalog(self) -> tuple[dict[str, dict], int]:
         body = await self.request("GET", "/api/tools")
@@ -80,21 +103,36 @@ class ToolClient:
 
     @staticmethod
     def parse_catalog(body: Any) -> tuple[dict[str, dict], int]:
+        reason = "CATALOG_SHAPE"
         try:
+            if not isinstance(body, dict):
+                raise ValueError("catalog must be an object")
             definitions, generation = body["tools"], body["generation"]
             if not isinstance(definitions, list) or not 1 <= len(definitions) <= 64 or type(generation) is not int:
-                raise ValueError("catalog")
+                raise ValueError("catalog header")
             result = {}
-            for definition in definitions:
-                name = definition["name"]
+            for index, definition in enumerate(definitions):
+                if not isinstance(definition, dict):
+                    reason = f"DEFINITION_{index}_TYPE"
+                    raise ValueError("definition must be an object")
+                name = definition.get("name")
                 if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name) or name in result:
-                    raise ValueError("name")
-                if not isinstance(definition["description"], str) or not validate_schema(definition["parameters"]):
-                    raise ValueError("definition")
+                    reason = f"DEFINITION_{index}_NAME"
+                    raise ValueError("invalid tool name")
+                if not isinstance(definition.get("description"), str):
+                    reason = f"DEFINITION_{name}_DESCRIPTION"
+                    raise ValueError("invalid description")
+                if not validate_schema(definition.get("parameters")):
+                    reason = f"DEFINITION_{name}_PARAMETERS"
+                    raise ValueError("invalid parameters")
                 result[name] = definition
+            logger.debug("[Tools] 工具目录读取完成 tools=%d generation=%d", len(result), generation)
             return result, generation
-        except (TypeError, KeyError, ValueError, RecursionError):
-            raise LLMError(502, "INVALID_TOOL_CATALOG", "Node 工具目录格式无效。") from None
+        except (TypeError, KeyError, ValueError, RecursionError) as error:
+            logger.warning("[Tools] 工具目录无效 reason=%s error=%s detail=%s",
+                           reason, type(error).__name__,
+                           diagnostics.safe_text(error, (), 240))
+            raise LLMError(502, "INVALID_TOOL_CATALOG", "Node 工具目录格式无效。") from error
 
     async def session(self) -> tuple[dict[str, dict], dict]:
         body = await self.request("GET", "/api/tools")

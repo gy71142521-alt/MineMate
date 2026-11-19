@@ -132,7 +132,12 @@ function createRegistry(bot, { movement, perception, ownerUsername = '', logger 
       return JSON.parse(JSON.stringify(result));
     } catch (error) {
       const known = error instanceof ToolError;
-      logger.error(`[Tools] ${name}：${known ? error.code : 'EXECUTION_FAILED'}`);
+      if (known) {
+        logger.error(`[Tools] ${name} 失败 code=${error.code} request=${requestId ?? '-'} detail=${error.message}`);
+      } else {
+        // 未预期异常保留堆栈，便于定位；已知工具错误只输出程序定义的 code/message。
+        logger.error(`[Tools] ${name} 未预期异常 request=${requestId ?? '-'}`, error);
+      }
       return fail(name, known ? error.code : 'EXECUTION_FAILED', known ? error.message : '工具执行失败，请查询游戏状态。');
     } finally { controller.signal.removeEventListener('abort', onAbort); }
   }

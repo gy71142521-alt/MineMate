@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 
+from app import diagnostics
 from app.config import load_settings
 from app.intent import MessageRequest
 from app.llm_client import LLMClient, LLMError
@@ -306,7 +307,50 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(error.exception.code, "INVALID_TOOL_CALL")
             self.assertIn("reason=" + reason, " ".join(captured.output))
             self.assertNotIn("unit-secret", " ".join(captured.output))
+            self.assertNotIn("preview=", " ".join(captured.output))
             client.execute.assert_not_awaited()
+
+    async def test_parallel_call_diagnostic_includes_count_and_tool_names(self):
+        first, second = call(), call(identity="call2")
+        loop, _, client = self.fixture([{"tool_calls": first["tool_calls"] + second["tool_calls"]}])
+        with self.assertLogs("minemate.tools", level="WARNING") as captured:
+            with self.assertRaises(LLMError):
+                await loop.run(REQUEST)
+        logs = " ".join(captured.output)
+        self.assertIn("code=PARALLEL_TOOL_CALLS", logs)
+        self.assertIn("count=2", logs)
+        self.assertIn("names=demo,demo", logs)
+        client.execute.assert_not_awaited()
+
+    async def test_traceback_all_includes_call_shape_preview_and_stack(self):
+        diagnostics.set_traceback_mode("all")
+        try:
+            first, second = call(), call(identity="call2")
+            loop, _, client = self.fixture([{"tool_calls": first["tool_calls"] + second["tool_calls"]}])
+            with self.assertLogs("minemate.tools", level="WARNING") as captured:
+                with self.assertRaises(LLMError):
+                    await loop.run(REQUEST)
+        finally:
+            diagnostics.set_traceback_mode("errors")
+        logs = " ".join(captured.output)
+        self.assertIn("code=PARALLEL_TOOL_CALLS", logs)
+        self.assertIn("calls=0:id=", logs)
+        self.assertIn("preview=", logs)
+        self.assertIn('"name": "demo"', logs)
+        self.assertIn("Traceback", logs)
+        client.execute.assert_not_awaited()
+
+    async def test_schema_diagnostic_reports_missing_and_unexpected_without_values(self):
+        loop, _, client = self.fixture([call(arguments={"x": 1, "secret": "unit-secret"})])
+        with self.assertLogs("minemate.tools", level="WARNING") as captured:
+            with self.assertRaises(LLMError):
+                await loop.run(REQUEST)
+        logs = " ".join(captured.output)
+        self.assertIn("code=ARGUMENTS_SCHEMA", logs)
+        self.assertIn("tool=demo", logs)
+        self.assertIn("missing=- unexpected=1", logs)
+        self.assertNotIn("unit-secret", logs)
+        client.execute.assert_not_awaited()
 
     async def test_invalid_reply_after_pending_still_cancels_with_safe_diagnostic(self):
         loop, _, client = self.fixture([call(), {"content": "```unit-secret```"}])

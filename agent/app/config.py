@@ -83,7 +83,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         llm_requests_per_minute=bounded_int("LLM_REQUESTS_PER_MINUTE", 20, 120),
         llm_player_cooldown=bounded_number("LLM_PLAYER_COOLDOWN", 3, 60),
         tool_calling_enabled=tool_enabled == "true",
-        tool_max_calls=bounded_int("TOOL_MAX_CALLS", 4, 8),
+        tool_max_calls=bounded_int("TOOL_MAX_CALLS", 4, 50),
         tool_calling_timeout=bounded_number("TOOL_CALLING_TIMEOUT", 90, 120),
         tool_api_timeout=bounded_number("TOOL_API_TIMEOUT", 25, 60),
         tool_llm_max_tokens=bounded_int("TOOL_LLM_MAX_TOKENS", 2048, 8192)
