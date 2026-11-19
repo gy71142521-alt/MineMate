@@ -33,7 +33,8 @@ class ConfigTests(unittest.TestCase):
         settings = load_settings({"TOOL_CALLING_ENABLED": "true", "TOOL_MAX_CALLS": "3", "TOOL_CALLING_TIMEOUT": "60", "TOOL_API_TIMEOUT": "25"})
         self.assertTrue(settings.tool_calling_enabled)
         self.assertEqual(settings.tool_max_calls, 3)
-        for name, value in [("TOOL_CALLING_ENABLED", "yes"), ("TOOL_MAX_CALLS", "0"), ("TOOL_MAX_CALLS", "9"), ("TOOL_MAX_CALLS", "1.5"), ("TOOL_CALLING_TIMEOUT", "nan"), ("TOOL_API_TIMEOUT", "61")]:
+        self.assertEqual(load_settings({"TOOL_MAX_CALLS": "50"}).tool_max_calls, 50)
+        for name, value in [("TOOL_CALLING_ENABLED", "yes"), ("TOOL_MAX_CALLS", "0"), ("TOOL_MAX_CALLS", "51"), ("TOOL_MAX_CALLS", "1.5"), ("TOOL_CALLING_TIMEOUT", "nan"), ("TOOL_API_TIMEOUT", "61")]:
             with self.assertRaises(ValueError):
                 load_settings({name: value})
 

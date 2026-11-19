@@ -8,6 +8,7 @@ import uuid
 from contextlib import suppress
 from typing import Any, Awaitable, Callable
 
+from .. import diagnostics
 from ..llm_client import LLMError
 from ..tool_client import ToolClient, validate
 from .models import ExecutionRequest, Step, TaskRequest
@@ -51,15 +52,24 @@ class TaskManager:
     async def submit(self, request: TaskRequest) -> dict:
         def prepare(catalog: dict) -> None:
             previous: set[str] = set()
+            step = None
             try:
                 for step in request.steps:
-                    if step.tool not in catalog or not validate_template(catalog[step.tool]["parameters"], step.arguments, previous):
-                        raise ReferenceError("invalid tool")
+                    if step.tool not in catalog:
+                        raise ReferenceError("tool not registered")
+                    if not validate_template(catalog[step.tool]["parameters"], step.arguments, previous):
+                        raise ReferenceError("invalid arguments or reference")
                     if step.tool in ("stop_movement", "follow_player"):
                         raise ReferenceError("continuous or preemptive tool")
                     previous.add(step.step_id)
-            except (ReferenceError, ValueError, TypeError, RecursionError):
-                raise LLMError(422, "INVALID_TASK", "步骤工具、参数或前序结果引用无效；持续跟随和停止请使用原接口。") from None
+            except (ReferenceError, ValueError, TypeError, RecursionError) as error:
+                diagnostics.log_error(
+                    logger, "[Execution] 任务步骤校验失败", error,
+                    secrets=(self.client.settings.llm_api_key,), level=logging.WARNING,
+                    include_traceback=False, player=request.player, request=request.request_id,
+                    step=getattr(step, "step_id", "-"), tool=getattr(step, "tool", "-"),
+                )
+                raise LLMError(422, "INVALID_TASK", "步骤工具、参数或前序结果引用无效；持续跟随和停止请使用原接口。") from error
 
         return await self.submit_program(request, prepare)
 
@@ -154,15 +164,32 @@ class TaskManager:
                 await worker
         except asyncio.CancelledError:
             record["status"], record["error"] = "cancelled", {"code": "CANCELLED", "message": "任务已取消；已发生的游戏操作不会回滚。"}
+            logger.info("[Execution] 任务取消 task=%s calls=%d", record["task_id"], record["calls"])
         except TimeoutError:
             record["status"], record["error"] = "uncertain", {"code": "TASK_TIMEOUT", "message": "任务超时，已请求停止；请根据现场确认已发生的操作。"}
+            logger.warning("[Execution] 任务超时 task=%s calls=%d timeout=%.1fs",
+                           record["task_id"], record["calls"], request.timeout_seconds)
         except ExecutionError as error:
             record["status"] = "uncertain" if error.uncertain else "failed"
             record["error"] = {"code": error.code, "message": "执行未确认或条件不满足，请查看执行记录与游戏现场；未自动重试。"}
+            logger.warning("[Execution] 任务失败 task=%s code=%s uncertain=%s calls=%d",
+                           record["task_id"], error.code, error.uncertain, record["calls"])
         except LLMError as error:
             record["status"], record["error"] = "failed", {"code": error.code, "message": "游戏服务不可用或任务控制权已失效，已停止后续调用。"}
-        except Exception:
+            diagnostics.log_error(
+                logger, "[Execution] 任务控制失败", error,
+                secrets=(self.client.settings.llm_api_key,),
+                level=logging.ERROR if error.status_code >= 500 else logging.WARNING,
+                include_traceback=error.status_code >= 500,
+                task=record["task_id"], code=error.code, status=error.status_code, calls=record["calls"],
+            )
+        except Exception as error:
             record["status"], record["error"] = "uncertain", {"code": "EXECUTION_FAILED", "message": "后台执行异常，结果需要核对；未自动重试。"}
+            diagnostics.log_error(
+                logger, "[Execution] 后台执行异常", error,
+                secrets=(self.client.settings.llm_api_key,), level=logging.ERROR,
+                task=record["task_id"], player=request.player, calls=record["calls"],
+            )
         finally:
             execution.close()
             for child in (worker, heartbeat):
@@ -178,8 +205,10 @@ class TaskManager:
             # 精确租约清理；旧任务清理遇到新实例/新任务会被 Node 拒绝。
             try:
                 await self.client.lease("release", request.player, record["context"])
-            except (LLMError, ExecutionError):
+            except (LLMError, ExecutionError) as error:
                 record["cleanup"] = "lease_already_lost_or_node_unavailable"
+                logger.warning("[Execution] 释放租约失败 task=%s code=%s",
+                               record["task_id"], getattr(error, "code", type(error).__name__))
             record["updated_at"] = time.time()
             logger.info("[Execution] task=%s status=%s", record["task_id"], record["status"])
 
@@ -190,6 +219,9 @@ class TaskManager:
             raise ExecutionError("CALL_LIMIT")
         record["calls"] += 1
         request_id = f'{record["task_id"]}_{record["calls"]}'
+        call_started = time.monotonic()
+        logger.info("[Execution] 工具调用开始 task=%s tool=%s request_id=%s call=%d",
+                    record["task_id"], name, request_id, record["calls"])
         entry: dict[str, Any] = {"request_id": request_id, "tool": name, "arguments": copy.deepcopy(arguments),
                                  "status": "submitted", "result": None, "before": None, "after": None}
         record["ledger"].append(entry)
@@ -200,6 +232,9 @@ class TaskManager:
             result = await self.client.execute(name, arguments, request.player, request_id,
                                                record["context"]["generation"], context=record["context"])
         except LLMError as error:
+            logger.warning("[Execution] 工具调用失败 task=%s tool=%s request_id=%s code=%s status=%d elapsed_ms=%d",
+                           record["task_id"], name, request_id, error.code, error.status_code,
+                           int((time.monotonic() - call_started) * 1000))
             if error.code in {"STALE_TASK", "STALE_INSTANCE", "STALE_LEASE", "FORBIDDEN", "BUSY", "BOT_NOT_READY"}:
                 entry["status"] = "rejected"
                 raise
@@ -210,14 +245,19 @@ class TaskManager:
                 if receipt.get("running") is not False:
                     raise ExecutionError("UNCONFIRMED_REQUEST", uncertain=True)
                 result = ToolClient.validate_result(name, receipt.get("result"))
-            except (LLMError, ExecutionError):
+            except (LLMError, ExecutionError) as receipt_error:
+                logger.warning("[Execution] 回执无法确认 task=%s tool=%s request_id=%s error=%s",
+                               record["task_id"], name, request_id, type(receipt_error).__name__)
                 entry["status"] = "uncertain"
                 with suppress(LLMError, ExecutionError):
                     entry["after"] = evidence(await self._snapshot(record))
-                raise ExecutionError("UNCONFIRMED_REQUEST", uncertain=True) from None
+                raise ExecutionError("UNCONFIRMED_REQUEST", uncertain=True) from receipt_error
         entry["result"] = copy.deepcopy(result)
         data = result.get("data") or {}
         error_code = (result.get("error") or {}).get("code", "TOOL_FAILED")
+        logger.info("[Execution] 工具调用完成 task=%s tool=%s request_id=%s success=%s status=%s error=%s elapsed_ms=%d",
+                    record["task_id"], name, request_id, result["success"], data.get("status"), error_code,
+                    int((time.monotonic() - call_started) * 1000))
         if not result["success"] or data.get("status") in ("uncertain", "failed", "cancelled"):
             uncertain = data.get("status") == "uncertain" or error_code in ("TIMEOUT", "EXECUTION_FAILED", "CANCELLED")
             entry["status"] = "uncertain" if uncertain else "failed"

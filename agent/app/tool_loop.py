@@ -1,10 +1,13 @@
 import asyncio
 import json
 import logging
+import re
+import time
 import uuid
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from . import diagnostics
 from .config import Settings
 from .intent import IntentBase, MessageRequest, redact
 from .llm_client import LLMClient, LLMError
@@ -41,6 +44,67 @@ TOOL_FAILURE_REPLIES = {
     "BLOCK_CHANGED": "目标位置的实际方块与指定名称不符，请重新查询。",
     "JUMP_FAILED": "未确认完成跳跃；请检查 Bot 是否在地面、头顶是否有空间，并查询当前移动状态。",
 }
+
+
+class ToolOutputError(ValueError):
+    """模型输出的安全诊断；只携带可写入日志的字段，不携带原始参数。"""
+
+    def __init__(self, code: str, detail: str, **context: object):
+        super().__init__(detail)
+        self.code, self.detail, self.context = code, detail, context
+
+
+def call_names(calls: list) -> str:
+    names: list[str] = []
+    for call in calls[:6]:
+        function = call.get("function") if isinstance(call, dict) else None
+        name = function.get("name") if isinstance(function, dict) else None
+        names.append(name if isinstance(name, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name) else "<invalid>")
+    return ",".join(names) or "-"
+
+
+def call_shape(calls: list) -> str:
+    """不输出参数值，只描述每个调用对象的字段类型和长度。"""
+    views: list[str] = []
+    for index, call in enumerate(calls[:6]):
+        if not isinstance(call, dict):
+            views.append(f"{index}:{type(call).__name__}")
+            continue
+        ident, kind, function = call.get("id"), call.get("type"), call.get("function")
+        name = function.get("name") if isinstance(function, dict) else None
+        arguments = function.get("arguments") if isinstance(function, dict) else None
+        kind_text = kind if isinstance(kind, str) and kind == "function" else type(kind).__name__
+        name_text = name if isinstance(name, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name) else "<invalid>"
+        if isinstance(arguments, str):
+            arguments_text = f"str({len(arguments)})"
+        elif isinstance(arguments, dict):
+            arguments_text = f"dict({len(arguments)})"
+        else:
+            arguments_text = type(arguments).__name__
+        views.append(f"{index}:id={len(ident) if isinstance(ident, str) else type(ident).__name__}"
+                     f",type={kind_text},name={name_text},args={arguments_text}")
+    return " | ".join(views) or "-"
+
+
+_SAFE_RESPONSE_KEYS = {"content", "tool_calls", "role", "function_call", "refusal", "reasoning_content"}
+
+
+def response_shape(response: object) -> str:
+    if not isinstance(response, dict):
+        return f"type={type(response).__name__}"
+    keys = sorted(str(key) if key in _SAFE_RESPONSE_KEYS else "OTHER" for key in response)[:8]
+    content, calls = response.get("content"), response.get("tool_calls")
+    return (f"keys={','.join(keys) or '-'} content={type(content).__name__}"
+            f" content_len={len(content) if isinstance(content, str) else '-'}"
+            f" calls={type(calls).__name__} calls_len={len(calls) if isinstance(calls, list) else '-'}")
+
+
+def schema_problem(schema: dict, arguments: dict) -> str:
+    required = schema.get("required", [])
+    properties = schema.get("properties", {})
+    missing = [key for key in required if key not in arguments]
+    unexpected = sum(1 for key in arguments if key not in properties)
+    return f"missing={','.join(missing) or '-'} unexpected={unexpected}"
 
 
 class FunctionCall(BaseModel):
@@ -116,10 +180,16 @@ class ToolLoop:
     async def run(self, request: MessageRequest) -> dict:
         if not self.settings.llm_api_key or not self.settings.llm_model:
             raise LLMError(503, "LLM_NOT_CONFIGURED", "语言模型尚未配置。")
+        secrets = (self.settings.llm_api_key,)
         executing = False
         pending_action = False
         request_id = None
         stage = "MODEL_RESPONSE"
+        calls_made = 0
+        calls: list = []
+        call = None
+        last_response = None
+        started = time.monotonic()
         try:
             async with asyncio.timeout(self.settings.tool_calling_timeout):
                 catalog, generation = await self.client.catalog()
@@ -135,18 +205,31 @@ class ToolLoop:
                 for index in range(self.settings.tool_max_calls + 1):
                     final = terminal or index == self.settings.tool_max_calls
                     response = await self.llm.tool_completion(messages, tools, final=final)
+                    last_response = response
                     stage = "MODEL_MESSAGE"
                     if not isinstance(response, dict):
-                        raise ValueError("message must be an object")
+                        raise ToolOutputError("MODEL_MESSAGE", "message must be an object", response=response_shape(response))
                     stage = "TOOL_CALL_LIST"
                     calls = response.get("tool_calls")
                     if calls is None:
                         calls = []
                     if not isinstance(calls, list):
-                        raise ValueError("tool calls must be a list")
+                        raise ToolOutputError("TOOL_CALL_LIST", "tool calls must be a list",
+                                              response=response_shape(response),
+                                              preview=diagnostics.model_preview(calls, secrets))
                     if not calls:
                         stage = "FINAL_REPLY"
-                        reply = display_reply(response.get("content"))
+                        content = response.get("content")
+                        try:
+                            reply = display_reply(content)
+                        except ValueError:
+                            raise ToolOutputError(
+                                "FINAL_REPLY", "invalid reply",
+                                content_type=type(content).__name__,
+                                content_len=len(content) if isinstance(content, str) else None,
+                                has_code_fence="```" in content if isinstance(content, str) else None,
+                                content_preview=diagnostics.model_preview(content, secrets),
+                            ) from None
                         # 未完成、失败或无法确认的游戏结果由程序确定提示，避免模型虚报成功。
                         unresolved = [result for result in results if not result["success"] or result["data"].get("status") in ("pending", "uncertain")]
                         if unresolved:
@@ -157,12 +240,17 @@ class ToolLoop:
                                 reply = TOOL_FAILURE_REPLIES.get(result["error"].get("code"), reply)
                         if final and not terminal and len(results) >= self.settings.tool_max_calls:
                             reply = "本次工具调用已达到上限；已完成的步骤请以游戏状态为准。"
+                        logger.info("[Tools] 回复完成 calls=%d reply_len=%d elapsed_ms=%d",
+                                    calls_made, len(reply), int((time.monotonic() - started) * 1000))
                         return {"intent": "conversation", "arguments": {}, "reply": redact(reply, self.settings.llm_api_key)}
                     if final:
                         raise LLMError(409, "TOOL_CALL_LIMIT", "本次工具调用已结束或达到上限。")
                     stage = "PARALLEL_TOOL_CALLS"
                     if len(calls) != 1:
-                        raise ValueError("parallel calls rejected")
+                        raise ToolOutputError("PARALLEL_TOOL_CALLS", "parallel calls rejected",
+                                              count=len(calls), names=call_names(calls),
+                                              calls=call_shape(calls),
+                                              preview=diagnostics.model_preview(calls, secrets))
                     stage = "TOOL_CALL_FORMAT"
                     call = ToolCall.model_validate(calls[0])
                     name = call.function.name
@@ -171,49 +259,101 @@ class ToolLoop:
                     fingerprint = json.dumps([name, arguments], sort_keys=True)
                     stage = "UNKNOWN_TOOL"
                     if name not in catalog:
-                        raise ValueError("unregistered tool")
+                        raise ToolOutputError("UNKNOWN_TOOL", "unregistered tool", tool=name, catalog_size=len(catalog),
+                                              arguments_preview=diagnostics.model_preview(arguments, secrets))
                     stage = "DUPLICATE_TOOL_CALL"
                     if call.id in ids or fingerprint in seen:
-                        raise ValueError("repeated call")
+                        raise ToolOutputError("DUPLICATE_TOOL_CALL", "repeated call", tool=name,
+                                              same_id=call.id in ids, same_arguments=fingerprint in seen,
+                                              arguments_preview=diagnostics.model_preview(arguments, secrets))
                     stage = "ARGUMENTS_SCHEMA"
                     if not validate(catalog[name]["parameters"], arguments):
-                        raise ValueError("invalid parameters")
+                        raise ToolOutputError("ARGUMENTS_SCHEMA", "invalid parameters", tool=name,
+                                              schema=schema_problem(catalog[name]["parameters"], arguments),
+                                              arguments_preview=diagnostics.model_preview(arguments, secrets))
                     seen.add(fingerprint)
                     ids.add(call.id)
                     # 玩家身份来自请求，由程序传递，不接受模型指定另一名玩家。
                     messages.append({"role": "assistant", "content": None, "tool_calls": [call.model_dump()]})
                     executing = True
                     request_id = uuid.uuid4().hex
+                    calls_made += 1
+                    stage = "TOOL_EXECUTE"
+                    tool_started = time.monotonic()
                     result = await self.client.execute(name, arguments, request.player, request_id, generation)
                     executing = False
                     pending_action = result["success"] and result["data"].get("status") == "pending"
-                    logger.info("[Tools] %s success=%s", name, result["success"])
+                    error_code = (result.get("error") or {}).get("code") if not result["success"] else None
+                    logger.info("[Tools] 工具结果 tool=%s success=%s status=%s error=%s elapsed_ms=%d calls=%d",
+                                name, result["success"], result["data"].get("status") if result["data"] else None,
+                                error_code or "-", int((time.monotonic() - tool_started) * 1000), calls_made)
                     results.append(result)
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(result, ensure_ascii=False)})
                     terminal = not result["success"] or result["data"].get("status") in ("pending", "uncertain") or name == "stop_movement"
                 raise LLMError(409, "TOOL_CALL_LIMIT", "工具调用达到上限。")
         except asyncio.CancelledError:
+            logger.info("[Tools] 请求被取消 stage=%s executing=%s pending=%s calls=%d", stage, executing, pending_action, calls_made)
             if executing or pending_action:
                 await self._cancel(request.player, request_id)
             raise
         except (TimeoutError, LLMError) as error:
+            elapsed = int((time.monotonic() - started) * 1000)
+            if isinstance(error, LLMError):
+                logger.warning("[Tools] 工具循环失败 code=%s status=%d stage=%s executing=%s pending=%s calls=%d elapsed_ms=%d",
+                               error.code, error.status_code, stage, executing, pending_action, calls_made, elapsed)
+            else:
+                logger.warning("[Tools] 工具循环超时 stage=%s executing=%s pending=%s calls=%d elapsed_ms=%d timeout=%.1fs",
+                               stage, executing, pending_action, calls_made, elapsed, self.settings.tool_calling_timeout)
             if executing or pending_action:
                 await self._cancel(request.player, request_id)
             if isinstance(error, LLMError):
                 raise
-            raise LLMError(504, "TOOL_LOOP_TIMEOUT", "本次工具调用超时，结果需要重新查询。") from None
+            raise LLMError(504, "TOOL_LOOP_TIMEOUT", "本次工具调用超时，结果需要重新查询。") from error
         except (ValueError, TypeError, KeyError, RecursionError) as error:
-            if stage == "TOOL_CALL_FORMAT" and isinstance(error, ValidationError):
-                logger.warning("[Tools] 模型输出校验失败：reason=%s fields=%s", stage, validation_details(error))
+            if isinstance(error, ToolOutputError):
+                diagnostics.log_error(
+                    logger, "[Tools] 模型输出校验失败", error,
+                    secrets=secrets, level=logging.WARNING, include_traceback=False,
+                    reason=stage, code=error.code, detail=error.detail, **error.context,
+                )
+            elif stage == "TOOL_CALL_FORMAT" and isinstance(error, ValidationError):
+                # Pydantic 原文可能含模型输入，即使 all 模式也只给安全 preview，不打印异常原文。
+                logger.warning(
+                    "[Tools] 模型输出校验失败：reason=%s code=TOOL_CALL_FORMAT fields=%s call=%s preview=%s",
+                    stage, validation_details(error), call_shape(calls),
+                    diagnostics.model_preview(calls[0], secrets) if calls else "-",
+                )
+            elif stage == "ARGUMENTS_JSON":
+                diagnostics.log_error(
+                    logger, "[Tools] 模型输出校验失败", error,
+                    secrets=secrets, level=logging.WARNING, include_traceback=False,
+                    reason=stage, code="ARGUMENTS_JSON", error_type=type(error).__name__,
+                    detail=diagnostics.safe_text(error, secrets, 240),
+                    arguments_len=len(call.function.arguments) if call else None,
+                    preview=diagnostics.model_preview(call.function.arguments, secrets) if call else None,
+                )
             else:
-                logger.warning("[Tools] 模型输出校验失败：reason=%s", stage)
+                diagnostics.log_error(
+                    logger, "[Tools] 模型输出校验失败", error,
+                    secrets=secrets, level=logging.WARNING, include_traceback=False,
+                    reason=stage, code=stage, error_type=type(error).__name__,
+                    detail=diagnostics.safe_text(error, secrets, 240),
+                    response=response_shape(last_response) if last_response is not None else None,
+                )
             if executing or pending_action:
                 await self._cancel(request.player, request_id)
-            raise LLMError(502, "INVALID_TOOL_CALL", "模型返回了无效工具调用或回复，已拒绝继续执行；此前操作请查询状态。") from None
+            # Pydantic ValidationError 的原文可能包含模型输入，不能进入异常链日志。
+            if isinstance(error, ValidationError):
+                raise LLMError(502, "INVALID_TOOL_CALL", "模型返回了无效工具调用或回复，已拒绝继续执行；此前操作请查询状态。") from None
+            raise LLMError(502, "INVALID_TOOL_CALL", "模型返回了无效工具调用或回复，已拒绝继续执行；此前操作请查询状态。") from error
 
     async def _cancel(self, player: str, request_id: str | None) -> None:
         try:
             async with asyncio.timeout(3):
                 await self.client.cancel(player, request_id)
-        except Exception:
-            logger.warning("[Tools] 无法确认取消结果，请在游戏中使用停止。")
+        except Exception as error:
+            diagnostics.log_error(
+                logger, "[Tools] 取消请求失败，无法确认 Node 已停止", error,
+                secrets=(self.settings.llm_api_key,), level=logging.WARNING,
+                player=player, request_id=request_id,
+            )

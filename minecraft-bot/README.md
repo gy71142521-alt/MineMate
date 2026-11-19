@@ -858,7 +858,7 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3000/api/tools/execute' -C
 
 工具模式每轮输出预算为 `TOOL_LLM_MAX_TOKENS`，默认 2048，上限 8192；Task 005 模式仍使用原 512。供应商可能把推理 token 计入预算。增大预算可能增加费用和耗时，不会自动触发重试。
 
-如果出现 `LLM_INVALID_RESPONSE` 或 `INVALID_TOOL_CALL`，查看 Python 终端紧邻错误之前的诊断行（只包含程序分类，不打印模型原文、参数值或密钥）：
+如果出现 `LLM_INVALID_RESPONSE` 或 `INVALID_TOOL_CALL`，查看 Python 终端紧邻错误之前的诊断行。诊断行包含 `rid`、`reason`、`code`、`detail` 和安全的计数字段，不打印模型原文、参数值或密钥；未预期异常会额外输出脱敏后的完整堆栈。完整说明见 [日志与诊断](../docs/logging.md)。
 
 | 诊断 | 含义及处理 |
 | --- | --- |
@@ -874,7 +874,7 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3000/api/tools/execute' -C
 
 工具调用解析兼容单调用的 `index: 0`（回传时删除）、1–256 字符的可见 ASCII 调用 ID（可包含冒号/点号），以及网关已解码的对象形式 arguments（先编码为 JSON，再执行相同的 Schema 校验）。不补造缺失的 ID/type/function，不移除未知业务参数，不把普通文本当作调用。非零/布尔序号、控制字符 ID、未知附加字段、非法工具名和不符合 Schema 的参数仍会被拒绝。
 
-`TOOL_CALL_FORMAT fields=ID:INVALID` 表示 ID 字符不合法；`FUNCTION_ARGUMENTS:TYPE` 表示参数既不是 JSON 字符串也不是对象；`TYPE:PATTERN` 表示调用类型不是 function；`OTHER:EXTRA_FIELD` 表示包含不支持的附加字段。日志只输出这些预定义分类，不包含实际字段值或未知字段名称。修正此类兼容代码后只需重启 Python，无需修改密钥或重启 Minecraft。
+`TOOL_CALL_FORMAT fields=ID:INVALID` 表示 ID 字符不合法；`FUNCTION_ARGUMENTS:TYPE` 表示参数既不是 JSON 字符串也不是对象；`TYPE:PATTERN` 表示调用类型不是 function；`OTHER:EXTRA_FIELD` 表示包含不支持的附加字段。日志只输出这些预定义分类，不包含实际字段值或未知字段名称；并行调用会额外输出 `count` 和合法工具名，参数 Schema 失败会输出缺失字段和多余字段数量。修正此类兼容代码后只需重启 Python，无需修改密钥或重启 Minecraft。
 
 ### 自动化结果与 Minecraft 验收
 

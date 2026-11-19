@@ -1,9 +1,11 @@
 import asyncio
 import json
 import logging
+import time
 
 import httpx
 
+from . import diagnostics
 from .config import Settings
 
 
@@ -22,13 +24,17 @@ reply 为简短中文单行普通文本，不要输出代码、Shell 命令、Ma
 示例：{"intent":"goto","arguments":{"x":100,"y":64,"z":200},"reply":"已识别坐标导航意图，尚未执行。"}
 """
 
+# 只用于日志分类，避免把供应商返回的未知字符串直接写进日志。
+_SAFE_FINISH_REASONS = {None, "stop", "tool_calls", "length", "content_filter", "function_call"}
+
 
 class LLMError(Exception):
-    def __init__(self, status_code: int, code: str, message: str):
+    def __init__(self, status_code: int, code: str, message: str, *, detail: str | None = None):
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.detail = detail
 
 
 class LLMClient:
@@ -53,11 +59,29 @@ class LLMClient:
         try:
             choice = body["choices"][0]
             content = choice["message"]["content"]
-            if choice.get("finish_reason") not in (None, "stop") or not isinstance(content, str) or not 0 < len(content) <= 8192:
+            finish = choice.get("finish_reason")
+            if finish not in (None, "stop") or not isinstance(content, str) or not 0 < len(content) <= 8192:
                 raise ValueError("incomplete output")
+            logger.debug("[LLM] 意图响应完成 model=%s finish=%s content_len=%d", config.llm_model, finish, len(content))
             return content
-        except (ValueError, KeyError, IndexError, TypeError):
-            raise LLMError(502, "LLM_INVALID_RESPONSE", "模型返回格式无效。") from None
+        except (ValueError, KeyError, IndexError, TypeError) as error:
+            finish = None
+            content_len = None
+            try:
+                choice = body["choices"][0]
+                finish = choice.get("finish_reason")
+                content = choice["message"]["content"]
+                content_len = len(content) if isinstance(content, str) else None
+            except (KeyError, IndexError, TypeError):
+                pass
+            logger.warning(
+                "[LLM] 意图响应无效 reason=INVALID_COMPLETE finish=%s content_len=%s error=%s body=%s",
+                finish if finish in _SAFE_FINISH_REASONS else "unknown",
+                content_len,
+                type(error).__name__,
+                diagnostics.model_preview(body, (config.llm_api_key,), 700) or "-",
+            )
+            raise LLMError(502, "LLM_INVALID_RESPONSE", "模型返回格式无效。") from error
 
     async def tool_completion(self, messages: list[dict], tools: list[dict], final: bool = False) -> dict:
         # 使用真正的 Chat Completions function tools；不将普通文本解释成工具调用。
@@ -69,46 +93,79 @@ class LLMClient:
             "max_tokens": self.settings.tool_llm_max_tokens
         })
         reason = "CHOICES_FORMAT"
+        finish = None
+        choices_count = 0
+        message_type = None
         try:
-            choice = body["choices"][0]
+            choices = body.get("choices")
+            choices_count = len(choices) if isinstance(choices, list) else 0
+            if not isinstance(choices, list) or not choices:
+                raise ValueError("choices must be a non-empty list")
+            choice = choices[0]
             if not isinstance(choice, dict):
                 raise ValueError("choice must be an object")
             finish = choice.get("finish_reason")
             if finish == "length":
-                logger.warning("[LLM] 工具响应被截断：reason=OUTPUT_LIMIT max_tokens=%d", self.settings.tool_llm_max_tokens)
+                logger.warning("[LLM] 工具响应被截断：reason=OUTPUT_LIMIT finish=length max_tokens=%d", self.settings.tool_llm_max_tokens)
                 raise LLMError(502, "LLM_OUTPUT_TRUNCATED", "模型输出达到长度上限，已拒绝执行不完整调用；可适当增加 TOOL_LLM_MAX_TOKENS。")
             reason = "MISSING_FINISH_REASON" if finish is None else "UNSUPPORTED_FINISH_REASON"
             if finish not in ("stop", "tool_calls"):
                 raise ValueError("incomplete tool response")
             reason = "MESSAGE_FORMAT"
             message = choice["message"]
+            message_type = type(message).__name__
             if not isinstance(message, dict):
                 raise ValueError("message must be an object")
+            calls = message.get("tool_calls")
+            logger.debug(
+                "[LLM] 工具响应完成 finish=%s tool_calls=%s content_len=%s",
+                finish, len(calls) if isinstance(calls, list) else 0,
+                len(message["content"]) if isinstance(message.get("content"), str) else 0,
+            )
             return message
-        except (ValueError, KeyError, IndexError, TypeError):
-            # 仅记录程序定义的分类；不输出模型原文、异常或供应商返回体。
-            logger.warning("[LLM] 工具响应无效：reason=%s", reason)
-            raise LLMError(502, "LLM_INVALID_RESPONSE", "模型工具调用响应无效。") from None
+        except LLMError:
+            raise
+        except (ValueError, KeyError, IndexError, TypeError) as error:
+            # 只记录程序定义的分类；不输出模型原文、异常或供应商返回体。
+            logger.warning(
+                "[LLM] 工具响应无效：reason=%s finish=%s choices=%d message_type=%s error=%s detail=%s body=%s",
+                reason,
+                finish if finish in _SAFE_FINISH_REASONS else "unknown",
+                choices_count,
+                message_type or "none",
+                type(error).__name__,
+                diagnostics.safe_text(error, (self.settings.llm_api_key,), 240),
+                diagnostics.model_preview(body, (self.settings.llm_api_key,), 700) or "-",
+            )
+            raise LLMError(502, "LLM_INVALID_RESPONSE", "模型工具调用响应无效。") from error
 
     async def _request(self, payload: dict) -> dict:
         config = self.settings
+        endpoint = f"{config.llm_base_url}/chat/completions"
+        tool_mode = "tools" in payload
+        started = time.monotonic()
+        raw = bytearray()
+        logger.debug(
+            "[LLM] 请求 model=%s messages=%d tools=%s max_tokens=%s timeout=%.1fs",
+            config.llm_model, len(payload.get("messages", [])), tool_mode, payload.get("max_tokens"), config.llm_timeout,
+        )
         try:
             # 总超时也覆盖流式下载；不自动重试，避免扩大限流或重复收费。
             async with asyncio.timeout(config.llm_timeout):
                 async with httpx.AsyncClient(timeout=config.llm_timeout, transport=self.transport, follow_redirects=False) as client:
-                    async with client.stream("POST", f"{config.llm_base_url}/chat/completions",
+                    async with client.stream("POST", endpoint,
                                              headers={"Authorization": f"Bearer {config.llm_api_key}"}, json=payload) as response:
-                        if response.status_code == 429:
-                            raise LLMError(429, "LLM_RATE_LIMITED", "模型服务限流，请稍后再试。")
-                        if response.status_code in (401, 403):
-                            raise LLMError(502, "LLM_AUTH_ERROR", "模型服务认证失败，请检查配置和账号权限。")
-                        if response.status_code >= 500:
-                            raise LLMError(502, "LLM_SERVER_ERROR", "模型服务暂不可用，请稍后再试。")
                         if response.status_code != 200:
-                            if "tools" in payload and response.status_code in (400, 422):
+                            await self._log_http_failure(response, tool_mode, started)
+                            if response.status_code == 429:
+                                raise LLMError(429, "LLM_RATE_LIMITED", "模型服务限流，请稍后再试。")
+                            if response.status_code in (401, 403):
+                                raise LLMError(502, "LLM_AUTH_ERROR", "模型服务认证失败，请检查配置和账号权限。")
+                            if response.status_code >= 500:
+                                raise LLMError(502, "LLM_SERVER_ERROR", "模型服务暂不可用，请稍后再试。")
+                            if tool_mode and response.status_code in (400, 422):
                                 raise LLMError(502, "LLM_TOOL_CALLING_REJECTED", "模型拒绝工具调用请求，请核对模型是否支持 function tools 及接口参数。")
                             raise LLMError(502, "LLM_REQUEST_REJECTED", "模型服务拒绝请求，请核对模型和接口兼容性。")
-                        raw = bytearray()
                         async for chunk in response.aiter_bytes():
                             raw.extend(chunk)
                             if len(raw) > 65536:
@@ -116,10 +173,43 @@ class LLMClient:
             body = json.loads(raw)
             if not isinstance(body, dict):
                 raise ValueError("invalid body")
+            logger.debug("[LLM] 请求完成 status=200 bytes=%d elapsed_ms=%d", len(raw), int((time.monotonic() - started) * 1000))
             return body
-        except (httpx.TimeoutException, TimeoutError):
-            raise LLMError(504, "LLM_TIMEOUT", "模型请求超时，请稍后再试。") from None
-        except httpx.RequestError:
-            raise LLMError(503, "LLM_UNAVAILABLE", "无法连接模型服务，请稍后再试。") from None
-        except (ValueError, KeyError, IndexError, TypeError):
-            raise LLMError(502, "LLM_INVALID_RESPONSE", "模型返回格式无效。") from None
+        except LLMError:
+            raise
+        except (httpx.TimeoutException, TimeoutError) as error:
+            logger.warning("[LLM] 请求超时 model=%s tools=%s timeout=%.1fs elapsed_ms=%d error=%s",
+                           config.llm_model, tool_mode, config.llm_timeout, int((time.monotonic() - started) * 1000), type(error).__name__)
+            raise LLMError(504, "LLM_TIMEOUT", "模型请求超时，请稍后再试。") from error
+        except httpx.RequestError as error:
+            # 只记录异常类型；底层 message 可能包含 URL 或认证细节。
+            logger.warning("[LLM] 网络请求失败 model=%s tools=%s elapsed_ms=%d error=%s",
+                           config.llm_model, tool_mode, int((time.monotonic() - started) * 1000),
+                           type(error).__name__)
+            raise LLMError(503, "LLM_UNAVAILABLE", "无法连接模型服务，请稍后再试。") from error
+        except (ValueError, KeyError, IndexError, TypeError) as error:
+            logger.warning("[LLM] 响应解析失败 model=%s tools=%s bytes=%d error=%s detail=%s",
+                           config.llm_model, tool_mode, len(raw), type(error).__name__,
+                           diagnostics.safe_text(error, (config.llm_api_key,), 300))
+            raise LLMError(502, "LLM_INVALID_RESPONSE", "模型返回格式无效。") from error
+
+    async def _log_http_failure(self, response: httpx.Response, tool_mode: bool, started: float) -> None:
+        """记录供应商返回的有界、脱敏错误正文；仅进日志，不进入 LLMError.message。"""
+        body = bytearray()
+        try:
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) >= 2048:
+                    break
+        except Exception as error:  # 日志辅助逻辑失败不应覆盖原始 HTTP 错误。
+            logger.debug("[LLM] 读取错误响应正文失败 error=%s", type(error).__name__)
+        snippet = bytes(body[:2048]).decode("utf-8", "replace")
+        logger.warning(
+            "[LLM] 请求失败 status=%d model=%s tools=%s bytes=%d elapsed_ms=%d body=%s",
+            response.status_code,
+            self.settings.llm_model,
+            tool_mode,
+            len(body),
+            int((time.monotonic() - started) * 1000),
+            diagnostics.safe_text(snippet, (self.settings.llm_api_key,), 600) if snippet else "-",
+        )

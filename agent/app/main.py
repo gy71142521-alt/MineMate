@@ -1,4 +1,7 @@
 import asyncio
+import logging
+import time
+import uuid
 from contextlib import suppress
 from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable
@@ -7,7 +10,9 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from . import diagnostics
 from .config import load_settings
+from .logging_config import configure_logging
 from .node_client import NodeApiError, NodeClient
 from .schemas import GotoRequest, MovementRequest
 from .intent import MessageRequest
@@ -22,6 +27,7 @@ from skills.catalog import create_skill_registry
 
 
 settings = load_settings()
+logger = logging.getLogger("minemate.http")
 task_manager = TaskManager(ToolClient(settings))
 skill_registry = create_skill_registry()
 # 所有后台 Skill 与显式工具任务共享执行槽和 Node 租约。
@@ -30,6 +36,10 @@ skill_manager = SkillManager(skill_registry, task_manager)
 
 @asynccontextmanager
 async def lifespan(_app):
+    configure_logging(secrets=(settings.llm_api_key,))
+    logger.info("[Agent] 服务启动 host=%s port=%d node=%s tool_calling=%s log_level=%s",
+                settings.agent_host, settings.agent_port, settings.node_api_url,
+                settings.tool_calling_enabled, logging.getLevelName(logging.getLogger().level))
     yield
     await task_manager.close()
 
@@ -49,8 +59,11 @@ def failure(code: str, message: str) -> dict[str, Any]:
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_error(_request, _error) -> JSONResponse:
+async def validation_error(request: Request, error: RequestValidationError) -> JSONResponse:
     # FastAPI 默认会返回另一种结构，这里统一为通信协议格式。
+    logger.warning("[HTTP] 请求参数无效 path=%s errors=%d fields=%s",
+                   request.url.path, len(error.errors()),
+                   diagnostics.safe_text(",".join(str(item.get("loc", "?")) for item in error.errors()[:6]), (), 240))
     return JSONResponse(status_code=422, content=failure("INVALID_ARGUMENT", "请求参数无效。"))
 
 
@@ -71,7 +84,9 @@ async def submit_task(request: Request) -> JSONResponse:
             return JSONResponse(status_code=413, content=failure("BODY_TOO_LARGE", "任务请求不能超过 16 KiB。"))
     try:
         task = TaskRequest.model_validate(json.loads(raw))
-    except (ValidationError, ValueError, TypeError, RecursionError):
+    except (ValidationError, ValueError, TypeError, RecursionError) as error:
+        detail = diagnostics.safe_validation_error(error, {"player", "request_id", "steps", "verify_inventory", "timeout_seconds", "max_tool_calls"}) if isinstance(error, ValidationError) else type(error).__name__
+        logger.warning("[HTTP] 后台任务参数无效 error=%s fields=%s", type(error).__name__, detail)
         return JSONResponse(status_code=422, content=failure("INVALID_ARGUMENT", "任务参数无效。"))
     return JSONResponse(status_code=202, content=success(await task_manager.submit(task)))
 
@@ -92,7 +107,9 @@ async def execute_skill(request: Request) -> JSONResponse:
             return JSONResponse(status_code=413, content=failure("BODY_TOO_LARGE", "Skill 请求不能超过 16 KiB。"))
     try:
         skill = SkillRequest.model_validate(json.loads(raw))
-    except (ValidationError, ValueError, TypeError, RecursionError):
+    except (ValidationError, ValueError, TypeError, RecursionError) as error:
+        detail = diagnostics.safe_validation_error(error, {"player", "request_id", "skill", "arguments", "timeout_seconds", "max_tool_calls"}) if isinstance(error, ValidationError) else type(error).__name__
+        logger.warning("[HTTP] Skill 请求参数无效 error=%s fields=%s", type(error).__name__, detail)
         return JSONResponse(status_code=422, content=failure("INVALID_ARGUMENT", "Skill 请求参数无效。"))
     return JSONResponse(status_code=202, content=success(await skill_manager.submit(skill)))
 
@@ -122,9 +139,12 @@ async def forward(call: Callable[[], Awaitable[dict[str, Any]]]) -> JSONResponse
         body = await call()
         return JSONResponse(status_code=200, content=body)
     except NodeApiError as error:
+        logger.warning("[HTTP] 转发 Node 请求失败 code=%s status=%d", error.code, error.status_code)
         return JSONResponse(status_code=error.status_code, content=failure(error.code, error.message))
-    except Exception:
-        # 不把内部堆栈或环境信息暴露给调用方。
+    except Exception as error:
+        # 不把内部堆栈或环境信息暴露给调用方，但服务端日志必须保留因果链。
+        diagnostics.log_error(logger, "[HTTP] 转发 Node 请求异常", error,
+                              secrets=(settings.llm_api_key,), level=logging.ERROR)
         return JSONResponse(status_code=502, content=failure("NODE_ERROR", "Node.js 请求处理失败。"))
 
 
@@ -135,6 +155,10 @@ async def health() -> dict[str, Any]:
 
 @app.post("/api/agent/message")
 async def agent_message(request: MessageRequest, http_request: Request) -> JSONResponse:
+    token = diagnostics.set_request_id(uuid.uuid4().hex[:8])
+    started = time.monotonic()
+    logger.info("[HTTP] /api/agent/message 开始 player=%s message_len=%d generation=%s",
+                request.player, len(request.message), request.generation)
     work = asyncio.create_task(message_handler.handle(request))
     try:
         while not work.done():
@@ -143,16 +167,26 @@ async def agent_message(request: MessageRequest, http_request: Request) -> JSONR
                 work.cancel()
                 with suppress(asyncio.CancelledError):
                     await work
+                logger.warning("[HTTP] 调用方断开，已取消 player=%s elapsed_ms=%d",
+                               request.player, int((time.monotonic() - started) * 1000))
                 return JSONResponse(status_code=499, content=failure("CLIENT_DISCONNECTED", "调用方已断开，已请求取消未完成操作。"))
         data = await work
+        logger.info("[HTTP] /api/agent/message 完成 player=%s status=200 elapsed_ms=%d",
+                    request.player, int((time.monotonic() - started) * 1000))
         return JSONResponse(status_code=200, content=success(data))
     except LLMError as error:
+        logger.log(
+            logging.ERROR if error.status_code >= 500 else logging.WARNING,
+            "[HTTP] /api/agent/message 失败 player=%s status=%d code=%s elapsed_ms=%d",
+            request.player, error.status_code, error.code, int((time.monotonic() - started) * 1000),
+        )
         return JSONResponse(status_code=error.status_code, content=failure(error.code, error.message))
     finally:
         if not work.done():
             work.cancel()
             with suppress(asyncio.CancelledError):
                 await work
+        diagnostics.reset_request_id(token)
 
 
 @app.get("/api/game/world")
@@ -178,4 +212,5 @@ async def stop(request: MovementRequest) -> JSONResponse:
 if __name__ == "__main__":
     import uvicorn
 
+    configure_logging(secrets=(settings.llm_api_key,))
     uvicorn.run("app.main:app", host=settings.agent_host, port=settings.agent_port, reload=False)

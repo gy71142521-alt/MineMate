@@ -1,12 +1,17 @@
 import copy
+import logging
 import re
 
 from pydantic import ValidationError
 
+from app import diagnostics
 from app.llm_client import LLMError
 
 from .base import Skill
 from .models import SkillParameters
+
+
+logger = logging.getLogger("minemate.skills")
 
 
 class SkillRegistry:
@@ -38,9 +43,12 @@ class SkillRegistry:
         return self._skills[name]
 
     def validate(self, name: str, arguments: dict) -> SkillParameters:
+        skill = self.get(name)
         try:
-            return self.get(name).parameters.model_validate(copy.deepcopy(arguments))
-        except ValidationError:
+            return skill.parameters.model_validate(copy.deepcopy(arguments))
+        except ValidationError as error:
+            logger.warning("[Skill] 参数无效 skill=%s fields=%s",
+                           name, diagnostics.safe_validation_error(error, skill.parameters.model_fields))
             raise LLMError(422, "INVALID_SKILL_ARGUMENT", "Skill 参数不符合定义。") from None
 
     def list(self) -> list[dict]:
