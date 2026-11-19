@@ -126,4 +126,17 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 - 前序结果引用只允许 `$ref: {step, path}` 指向已完成步骤的 JSON 字段/数组索引；替换后重新按 Node Schema 校验。禁止 eval、表达式或访问对象属性。
 - 工具完成不等于最终目标完成。第一版后台验证仅支持显式背包数量/增量条件；没有验证条件时返回 `finished_unverified`，不得标成 `completed`。
 - 本机 API 为可信调用方使用，租约是协调机制，不是身份认证。后台执行器运行单个 Python 服务进程，不启动多 worker；新增规划能力前先通过 `docs/tasks/task007-preparation.md` 的游戏验收。
-- 资源语义解析必须使用 Node 工具 `resolve_resource`（`minecraft-bot/src/tools/perception/resources.js`），从运行时 registry 读取当前版本和模组物品/方块；不得在 Python 维护静态别名清单，也不得猜测未知模组名称。候选为空或有歧义时必须澄清，Skill 和 Planning 仍必须使用真实工具目录及结果验证。`agent/app/semantic.py` 只能提供不改写参数的兼容辅助函数。
+- 资源语义解析必须使用 Node 工具 `resolve_resource`（`minecraft-bot/src/tools/perception/resources.js`），从运行时 registry 读取当前版本和模组物品/方块/实体类型；`kind=entity` 查询实体，`any` 保留仅物品和方块的原行为。不得在 Python 维护静态别名清单，也不得猜测未知模组名称。候选为空或有歧义时必须澄清，Skill 和 Planning 仍必须使用真实工具目录及结果验证。`agent/app/semantic.py` 只能提供不改写参数的兼容辅助函数。
+
+## 11. Skill 开发规范（Task 006.5）
+
+- Skill 统一放在 `agent/skills/`，与 Node Tool Registry 分开管理。每个 Skill 继承 `Skill`，声明名称、描述、严格 Pydantic 参数模型、前置条件、完成条件及依赖工具；不在 Python 复制 Node 工具 Schema。
+- 每个业务 Skill 使用独立目录 `agent/skills/<name>/`，包含 `SKILL.md`（用途、参数、示例、边界）、`metadata.py`（运行时元数据及参数模型）、`SOP.md`（实际工具顺序、分支、失败处理与验收）、`skill.py`（执行/核验）及 `__init__.py`（公开导出）。辅助资源按需添加，当前搜索技能暂不添加。公共执行基础设施仍放在 skills 根目录。
+- 元数据与参数 Schema 由 metadata.py 经 Skill Registry 生成，不另行维护重复的 JSON/YAML 工具定义。SKILL.md 与 SOP.md 当前作为说明文件，不自动加载为 LLM 提示或可执行程序。文档必须与实际实现同步，逐个 Skill 提供“测试命令 → 工具调用顺序 → 成功验证方式”。
+- SKILL.md 的 YAML `name` 仅使用小写字母、数字和连字符，例如 `explore-and-find`；Python 包名及现有 API 注册名继续使用下划线，例如 `explore_and_find`，在说明中明确对应关系。
+- 通过 `SkillRuntime.call()` 调用工具，每次逻辑操作提供唯一 `operation_id`，根据最新 Node 目录再次验证。重复同 ID 只复用结果，不重复副作用；参数变化则拒绝。同一 Skill 的工具串行执行，轮询必须有调用次数和时间上限。
+- Skill 与显式后台工具序列共用 `TaskManager` 的执行槽、租约、心跳、账本、回执与取消；禁止另建争用 Bot 的独立任务队列。Skill 不得创建脱离执行器生命周期的后台任务，不得绕过 ToolClient 操作 Minecraft。
+- `execute()` 返回的数据不是成功凭证。`verify()` 必须对实际执行前后快照检查所有 `success_criteria`，提供结构化证据；失败或不确定结果不得标为 completed。Skill 内部使用确定性程序，不逐个工具调用 LLM。
+- 同一玩家的 `request_id` 在后台工具任务和 Skill 中共享幂等范围，最多保留 64 个内存记录。停止、死亡、换维度、断线和 Node 重启后，不得续跑失效租约；不提供跨重启自动恢复。
+- 生产 Skill 统一由 `agent/skills/catalog.py` 注册。已实现 A 基础设施和 B `explore_and_find`，后续按 C 采集、D 合成、E 熔炼、F LLM 集成与真实游戏验收逐步推进；具体合同、风险与验收见 `docs/tasks/task0065-skills.md`。Mock/回环 HTTP 测试不等同于 Minecraft 验收。
+- 搜索使用三维距离、有限已加载范围、有限路点和候选站位；只读搜索不得移动。接近复用原导航，并重新确认同一坐标/实体 ID 和最终距离。不得把“未发现”表述为整个世界没有资源。进度通过 `report_progress()` 写入有界执行记录；失败仍保留搜索范围、路点与真实工具账本。

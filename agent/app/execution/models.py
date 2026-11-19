@@ -21,18 +21,25 @@ class InventoryCheck(StrictModel):
     mode: Literal["at_least", "increase"] = "increase"
 
 
-class TaskRequest(StrictModel):
+class ExecutionRequest(StrictModel):
     player: str = Field(pattern=r"^[A-Za-z0-9_]{3,16}$")
     request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
-    steps: list[Step] = Field(min_length=1, max_length=24)
-    verify_inventory: list[InventoryCheck] = Field(default_factory=list, max_length=16)
     timeout_seconds: float = Field(default=300, gt=0, le=600)
     max_tool_calls: int = Field(default=96, ge=1, le=192)
+
+    @model_validator(mode="after")
+    def bounded_payload(self):
+        if len(json.dumps(self.model_dump(), allow_nan=False).encode()) > 16384:
+            raise ValueError("execution too large")
+        return self
+
+
+class TaskRequest(ExecutionRequest):
+    steps: list[Step] = Field(min_length=1, max_length=24)
+    verify_inventory: list[InventoryCheck] = Field(default_factory=list, max_length=16)
 
     @model_validator(mode="after")
     def unique_and_bounded(self):
         if len({step.step_id for step in self.steps}) != len(self.steps):
             raise ValueError("duplicate step")
-        if len(json.dumps(self.model_dump(), allow_nan=False).encode()) > 16384:
-            raise ValueError("task too large")
         return self

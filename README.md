@@ -8,6 +8,10 @@ Minecraft Java Edition AI 玩伴。Node.js 负责游戏控制，Python Agent 负
 
 Planning 前置接口已补齐：移动终态、配方/交互站位查询、后台显式工具序列、熔炼续接、整任务租约和执行回执。新增接口、请求示例和游戏验收见 [Task 007 前置衔接说明](docs/tasks/task007-preparation.md)。当前尚未接入 LLM 自动计划生成或重新规划；原自然语言消息接口保持 Task 006 行为。
 
+Task 006.5 已实现阶段 A 基础设施及阶段 B 的 `explore_and_find`：可搜索方块/实体类型，选择有限路点探索及接近目标，并通过真实工具结果和最终距离核验。测试脚本可直接调用 Skill、显示进度和完整工具账本，操作示例见 [Skill 实施与测试说明](docs/tasks/task0065-skills.md#阶段-bexplore_and_find)。其余三个业务 Skill 与自然语言选择 Skill 尚未接入。无需新增依赖或修改现有 `.env`。
+
+业务 Skill 按“一技能一目录”组织。首个技能的 [SKILL.md](agent/skills/explore_and_find/SKILL.md) 提供用途、输入与测试命令，[SOP.md](agent/skills/explore_and_find/SOP.md) 记录工具顺序和验收；同目录 `metadata.py` 是运行时元数据及参数的唯一代码来源，`skill.py` 实现执行。当前暂不添加辅助资源，说明文件尚未接入 LLM。
+
 ## 临时测试启动器（Windows）
 
 在项目根目录双击 **`start-minemate.cmd`**，打开窗口后点击 **“一键启动”**。

@@ -2,14 +2,15 @@ import asyncio
 import copy
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import suppress
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from ..llm_client import LLMError
 from ..tool_client import ToolClient, validate
-from .models import TaskRequest
+from .models import ExecutionRequest, Step, TaskRequest
 from .references import ReferenceError, resolve, validate_template
 
 logger = logging.getLogger("minemate.execution")
@@ -48,10 +49,27 @@ class TaskManager:
         self._closed = False
 
     async def submit(self, request: TaskRequest) -> dict:
+        def prepare(catalog: dict) -> None:
+            previous: set[str] = set()
+            try:
+                for step in request.steps:
+                    if step.tool not in catalog or not validate_template(catalog[step.tool]["parameters"], step.arguments, previous):
+                        raise ReferenceError("invalid tool")
+                    if step.tool in ("stop_movement", "follow_player"):
+                        raise ReferenceError("continuous or preemptive tool")
+                    previous.add(step.step_id)
+            except (ReferenceError, ValueError, TypeError, RecursionError):
+                raise LLMError(422, "INVALID_TASK", "步骤工具、参数或前序结果引用无效；持续跟随和停止请使用原接口。") from None
+
+        return await self.submit_program(request, prepare)
+
+    async def submit_program(self, request: ExecutionRequest, prepare: Callable[[dict], None],
+                             program: Callable[["ExecutionContext"], Awaitable[None]] | None = None) -> dict:
+        """只接受进程内注册的程序，复用原执行槽；HTTP 不接受可执行内容。"""
         async with self._admission:
             if self._closed:
                 raise LLMError(503, "EXECUTOR_CLOSED", "后台执行器已关闭。")
-            fingerprint = json.dumps(request.model_dump(), sort_keys=True, allow_nan=False)
+            fingerprint = json.dumps([type(request).__name__, request.model_dump()], sort_keys=True, allow_nan=False)
             for record in self.records.values():
                 if record["player"].lower() == request.player.lower() and record["request_id"] == request.request_id:
                     if record["fingerprint"] != fingerprint:
@@ -63,16 +81,7 @@ class TaskManager:
             if len(self.records) >= 64:
                 raise LLMError(429, "TASK_HISTORY_FULL", "本进程任务记录已满，请保存记录后重启 Agent。")
             catalog, context = await self.client.session()
-            previous: set[str] = set()
-            try:
-                for step in request.steps:
-                    if step.tool not in catalog or not validate_template(catalog[step.tool]["parameters"], step.arguments, previous):
-                        raise ReferenceError("invalid tool")
-                    if step.tool in ("stop_movement", "follow_player"):
-                        raise ReferenceError("continuous or preemptive tool")
-                    previous.add(step.step_id)
-            except (ReferenceError, ValueError, TypeError, RecursionError):
-                raise LLMError(422, "INVALID_TASK", "步骤工具、参数或前序结果引用无效；持续跟随和停止请使用原接口。") from None
+            prepare(catalog)
             acquired = await self.client.lease("acquire", request.player, context)
             context = {**context, "leaseId": acquired["lease"]["leaseId"]}
             task_id = uuid.uuid4().hex
@@ -80,7 +89,7 @@ class TaskManager:
                       "created_at": time.time(), "updated_at": time.time(), "steps": [], "ledger": [], "error": None,
                       "verification": None, "fingerprint": fingerprint, "context": context, "calls": 0}
             self.records[task_id] = record
-            self._work[task_id] = asyncio.create_task(self._run(record, request, catalog))
+            self._work[task_id] = asyncio.create_task(self._run(record, request, catalog, program))
             return self.view(task_id)
 
     def view(self, task_id: str, player: str | None = None) -> dict:
@@ -130,12 +139,14 @@ class TaskManager:
             raise ExecutionError("INVALID_WORLD_SNAPSHOT")
         return snapshot
 
-    async def _run(self, record: dict, request: TaskRequest, catalog: dict) -> None:
+    async def _run(self, record: dict, request: ExecutionRequest, catalog: dict,
+                   program: Callable[["ExecutionContext"], Awaitable[None]] | None = None) -> None:
         worker = heartbeat = None
+        execution = ExecutionContext(self, record, request, catalog)
         try:
             record["status"] = "running"
             async with asyncio.timeout(request.timeout_seconds):
-                worker = asyncio.create_task(self._sequence(record, request, catalog))
+                worker = asyncio.create_task(program(execution) if program else self._sequence(record, request, catalog))
                 heartbeat = asyncio.create_task(self._heartbeat(record))
                 done, _ = await asyncio.wait({worker, heartbeat}, return_when=asyncio.FIRST_COMPLETED)
                 if heartbeat in done:
@@ -153,6 +164,7 @@ class TaskManager:
         except Exception:
             record["status"], record["error"] = "uncertain", {"code": "EXECUTION_FAILED", "message": "后台执行异常，结果需要核对；未自动重试。"}
         finally:
+            execution.close()
             for child in (worker, heartbeat):
                 if child and not child.done():
                     child.cancel()
@@ -171,7 +183,7 @@ class TaskManager:
             record["updated_at"] = time.time()
             logger.info("[Execution] task=%s status=%s", record["task_id"], record["status"])
 
-    async def _call(self, record: dict, request: TaskRequest, catalog: dict, name: str, arguments: dict) -> dict:
+    async def _call(self, record: dict, request: ExecutionRequest, catalog: dict, name: str, arguments: dict) -> dict:
         if name not in catalog or not validate(catalog[name]["parameters"], arguments):
             raise ExecutionError("INVALID_ARGUMENT")
         if record["calls"] >= request.max_tool_calls:
@@ -215,7 +227,7 @@ class TaskManager:
         entry["status"] = data.get("status", "completed")
         return result
 
-    async def _wait(self, record: dict, request: TaskRequest, catalog: dict, step, arguments: dict, result: dict) -> dict:
+    async def _wait(self, record: dict, request: ExecutionRequest, catalog: dict, step, arguments: dict, result: dict) -> dict:
         data = result["data"]
         if data.get("status") != "pending":
             return result
@@ -273,3 +285,87 @@ class TaskManager:
             record["status"] = "completed"
         else:
             record["status"] = "finished_unverified"
+
+
+class ExecutionContext:
+    """提供给确定性 Skill 的受限工具入口，共用账本、等待和租约语义。"""
+
+    def __init__(self, manager: TaskManager, record: dict, request: ExecutionRequest, catalog: dict):
+        self._manager, self._record, self._request, self._catalog = manager, record, request, catalog
+        self._closed = False
+        self._busy = False
+        self._unconfirmed = False
+        self._operations: dict[str, dict] = {}
+
+    def close(self) -> None:
+        self._closed = True
+
+    def _check(self) -> None:
+        if self._closed:
+            raise ExecutionError("EXECUTION_CLOSED")
+        if self._unconfirmed:
+            raise ExecutionError("UNCONFIRMED_RESULT", uncertain=True)
+        if asyncio.current_task().cancelling():
+            raise asyncio.CancelledError
+
+    async def snapshot(self) -> dict:
+        self._check()
+        value = await self._manager._snapshot(self._record)
+        self._check()
+        return copy.deepcopy(value)
+
+    def report_progress(self, data: dict) -> None:
+        self._check()
+        if not isinstance(data, dict) or len(json.dumps(data, allow_nan=False).encode()) > 16384:
+            raise ExecutionError("INVALID_SKILL_RESULT")
+        self._record["program_data"] = copy.deepcopy(data)
+        self._record["updated_at"] = time.time()
+
+    async def call(self, name: str, arguments: dict, *, operation_id: str, wait_seconds: float = 90) -> dict:
+        self._check()
+        # operation_id 表示一次逻辑操作；相同 ID 只返回原结果，绝不重复副作用。
+        if not isinstance(operation_id, str) or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,63}", operation_id):
+            raise ExecutionError("INVALID_OPERATION_ID")
+        if name in ("stop_movement", "follow_player"):
+            raise ExecutionError("UNBOUNDED_OR_PREEMPTIVE_TOOL")
+        step = Step(step_id="operation", tool=name, arguments=arguments, wait_seconds=wait_seconds)
+        fingerprint = json.dumps([name, arguments, wait_seconds], sort_keys=True, allow_nan=False)
+        previous = self._operations.get(operation_id)
+        if previous:
+            if previous["fingerprint"] != fingerprint:
+                raise ExecutionError("OPERATION_CONFLICT")
+            if previous["result"] is None:
+                raise ExecutionError("OPERATION_ALREADY_ATTEMPTED", uncertain=True)
+            return copy.deepcopy(previous["result"])
+        if self._busy:
+            raise ExecutionError("CONCURRENT_TOOL_CALL")
+        self._busy = True
+        operation = {"fingerprint": fingerprint, "result": None}
+        self._operations[operation_id] = operation
+        try:
+            result = await self._manager._call(self._record, self._request, self._catalog, name, arguments)
+            self._check()
+            async with asyncio.timeout(wait_seconds):
+                result = await self._manager._wait(self._record, self._request, self._catalog, step, arguments, result)
+            self._check()
+            operation["result"] = copy.deepcopy(result)
+            return result
+        except (ExecutionError, LLMError) as error:
+            if isinstance(error, LLMError) or error.uncertain:
+                self._unconfirmed = True
+            raise
+        except TimeoutError:
+            self._unconfirmed = True
+            raise ExecutionError("WAIT_TIMEOUT", uncertain=True) from None
+        finally:
+            self._busy = False
+
+    def finish(self, data: dict, verification: dict) -> None:
+        self._check()
+        # 即使 Tool 返回 completed，也必须由 Skill 的独立验收钩子给出证据。
+        self._record["program_data"] = copy.deepcopy(data)
+        self._record["verification"] = copy.deepcopy(verification)
+        checks = verification.get("checks")
+        if not isinstance(checks, list) or not checks or not all(check.get("passed") is True for check in checks):
+            raise ExecutionError("GOAL_NOT_VERIFIED")
+        self._record["status"] = "completed"

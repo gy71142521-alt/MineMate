@@ -17,10 +17,15 @@ from .tool_client import ToolClient
 from .tool_loop import ToolLoop
 from .execution.manager import TaskManager
 from .execution.models import TaskRequest
+from skills import SkillManager, SkillRequest
+from skills.catalog import create_skill_registry
 
 
 settings = load_settings()
 task_manager = TaskManager(ToolClient(settings))
+skill_registry = create_skill_registry()
+# 所有后台 Skill 与显式工具任务共享执行槽和 Node 租约。
+skill_manager = SkillManager(skill_registry, task_manager)
 
 
 @asynccontextmanager
@@ -69,6 +74,37 @@ async def submit_task(request: Request) -> JSONResponse:
     except (ValidationError, ValueError, TypeError, RecursionError):
         return JSONResponse(status_code=422, content=failure("INVALID_ARGUMENT", "任务参数无效。"))
     return JSONResponse(status_code=202, content=success(await task_manager.submit(task)))
+
+
+@app.get("/api/agent/skills")
+async def list_skills() -> dict:
+    return success({"skills": skill_registry.list()})
+
+
+@app.post("/api/agent/skills/execute", status_code=202)
+async def execute_skill(request: Request) -> JSONResponse:
+    from pydantic import ValidationError
+    import json
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 16384:
+            return JSONResponse(status_code=413, content=failure("BODY_TOO_LARGE", "Skill 请求不能超过 16 KiB。"))
+    try:
+        skill = SkillRequest.model_validate(json.loads(raw))
+    except (ValidationError, ValueError, TypeError, RecursionError):
+        return JSONResponse(status_code=422, content=failure("INVALID_ARGUMENT", "Skill 请求参数无效。"))
+    return JSONResponse(status_code=202, content=success(await skill_manager.submit(skill)))
+
+
+@app.get("/api/agent/skills/executions/{execution_id}")
+async def skill_status(execution_id: str, player: str) -> dict:
+    return success(skill_manager.view(execution_id, player))
+
+
+@app.post("/api/agent/skills/executions/{execution_id}/cancel")
+async def cancel_skill(execution_id: str, request: MovementRequest) -> dict:
+    return success(await skill_manager.cancel(execution_id, request.username))
 
 
 @app.get("/api/agent/tasks/{task_id}")

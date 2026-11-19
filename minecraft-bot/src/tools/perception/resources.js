@@ -15,7 +15,9 @@ function collectEntries(registry, kind) {
     ? [['item', registry?.itemsByName]]
     : kind === 'block'
       ? [['block', registry?.blocksByName]]
-      : [['item', registry?.itemsByName], ['block', registry?.blocksByName]];
+      : kind === 'entity'
+        ? [['entity', registry?.entitiesByName]]
+        : [['item', registry?.itemsByName], ['block', registry?.blocksByName]];
   const entries = [];
   for (const [entryKind, table] of groups) {
     if (!table || typeof table !== 'object') continue;
@@ -53,7 +55,7 @@ function resolveResource(bot, args) {
   const query = typeof args?.query === 'string' ? args.query.trim() : '';
   const kind = args?.kind ?? 'any';
   ensure(query.length > 0 && query.length <= 64 && !/[\u0000-\u001f\u007f]/.test(query), 'INVALID_ARGUMENT', '资源查询词无效。');
-  ensure(['item', 'block', 'any'].includes(kind), 'INVALID_ARGUMENT', '资源类型无效。');
+  ensure(['item', 'block', 'entity', 'any'].includes(kind), 'INVALID_ARGUMENT', '资源类型无效。');
   const scored = collectEntries(bot?.registry, kind)
     .map((entry) => ({ entry, confidence: scoreEntry(entry, query) }))
     .filter((item) => item.confidence > 0)
@@ -76,12 +78,12 @@ function resolveResource(bot, args) {
 function registerResourceTools(registry) {
   registry.register({
     name: 'resolve_resource',
-    description: '只读查询当前 Minecraft 运行时注册表中的物品或方块候选。必须先用它确认自然语言目标的真实 name，再调用其他工具；无法唯一确定时应向玩家澄清。',
+    description: '只读查询当前 Minecraft 运行时注册表中的物品、方块或实体类型候选。kind=entity 查询实体；any 保持仅物品和方块。必须先确认目标的真实 name；无法唯一确定时应向玩家澄清。',
     parameters: {
       type: 'object',
       properties: {
         query: { type: 'string', minLength: 1, maxLength: 64 },
-        kind: { type: 'string', enum: ['item', 'block', 'any'] }
+        kind: { type: 'string', enum: ['item', 'block', 'entity', 'any'] }
       },
       required: ['query', 'kind'],
       additionalProperties: false
