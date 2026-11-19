@@ -2,7 +2,7 @@
 
 ## 阶段 A 交付范围
 
-阶段 A 建立了 Skill 接口、独立注册表、严格参数校验、执行适配、后台 API 和最终目标核验；当时生产注册表为空。当前已进入阶段 B，生产目录注册了 `explore_and_find`，详见后文。其余三个业务 Skill、LLM Skill 选择、Minecraft 进度回复在后续阶段接入。Task 006 的自然语言 Tool Calling、本地聊天指令和显式后台任务接口继续使用原行为。
+阶段 A 建立了 Skill 接口、独立注册表、严格参数校验、执行适配、后台 API 和最终目标核验；当时生产注册表为空。当前已实现阶段 B 搜索和阶段 C 采集，生产目录注册了 `explore_and_find`、`gather_resource`，详见后文。合成、熔炼 Skill、LLM Skill 选择、Minecraft 进度回复在后续阶段接入。Task 006 的自然语言 Tool Calling、本地聊天指令和显式后台任务接口继续使用原行为。
 
 没有新增依赖，没有修改 `.env`、密钥或认证缓存。Python 仍只通过 Node 工具执行游戏操作。
 
@@ -23,6 +23,12 @@ agent/
       skill.py       # 阶段 B：有界搜索与接近
       SKILL.md       # 技能说明、输入与命令示例
       SOP.md         # 工具顺序、分支与验收
+    gather_resource/ # 阶段 C：采集与拾取核验，同样一技能一目录
+      __init__.py
+      metadata.py
+      skill.py
+      SKILL.md
+      SOP.md
   app/
     execution/
       models.py      # 共用 ExecutionRequest，保留原 TaskRequest
@@ -31,8 +37,10 @@ agent/
   test/
     test_skills.py   # 测试专用 Skill、Mock HTTP 与真实 Node HTTP 集成
     test_explore_and_find.py # 搜索 Skill 的单元及 HTTP 集成测试
+    test_gather_resource.py # 采集 Skill 的单元及真实 Node HTTP 测试
 scripts/
   test-explore-skill.ps1 # 手动提交与轮询真实 Skill 的测试入口
+  test-gather-skill.ps1 # 采集 Skill 测试入口
 ```
 
 `Skill` 必须声明 `name`、`description`、`parameters`、`preconditions`、`success_criteria`、`required_tools`。参数模型继承 `SkillParameters`，拒绝额外字段、字符串数字和非有限数值。
@@ -79,7 +87,7 @@ Skill 的 `execute(runtime, parameters)` 返回普通 JSON 对象；`verify(para
 
 ## 已知风险及后续解决方案
 
-以下记录阶段 B～F 的风险方案。阶段 B 的有限搜索、站位接近、实体解析及进度观察已实现，后续采集/合成/熔炼与 LLM 接入仍按表中阶段推进；不依赖 Memory。
+以下记录阶段 B～F 的风险方案。阶段 B 的有限搜索、站位接近、实体解析及进度观察、阶段 C 的采集与拾取已实现；合成/熔炼与 LLM 接入仍按表中阶段推进，不依赖 Memory。
 
 | 风险 | 处理方案 | 实施阶段 |
 | --- | --- | --- |
@@ -121,7 +129,7 @@ Node HTTP 集成使用真实 Node 进程、原工具注册和 HTTP 服务，但 
 
 ## 阶段 B：explore_and_find
 
-本阶段只实现这一个 Skill。`catalog.py` 集中注册；通过原有 Skill HTTP API 调用，不调用 LLM。游戏聊天仍走原来的 Tool Calling，本阶段直接说“找一棵树”不会保证进入这个 Skill。
+阶段 B 只实现搜索 Skill；后续阶段 C 添加了采集 Skill。`catalog.py` 集中注册；通过原有 Skill HTTP API 调用，不调用 LLM。游戏聊天仍走原来的 Tool Calling，直接说“找一棵树”不会保证进入搜索 Skill。
 
 技能已整理为独立目录 `agent/skills/explore_and_find/`。用途与命令见 [SKILL.md](../../agent/skills/explore_and_find/SKILL.md)，准确执行分支见 [SOP.md](../../agent/skills/explore_and_find/SOP.md)。元数据和参数由 `metadata.py` 统一维护并经注册表生成，执行逻辑位于 `skill.py`；原 `from skills.explore_and_find import ...` 保持兼容。辅助资源暂不添加，文档目前不会自动加载给 LLM。
 
@@ -217,7 +225,7 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/api/agent/skills/exec
 7. 重复同一 request_id，确认不再次移动；新请求使用不同 ID。
 8. 回归「你好」「状态」「跟随我」「停止」「前往 X Y Z」和原 Tool Calling。
 
-本阶段没有可用的真实 Minecraft 会话，以上验收尚需用户执行。通过后再推进阶段 C gather_resource。
+以上搜索验收尚需用户在真实 Minecraft 执行；后续已添加阶段 C 的采集实现，但不代表搜索或采集已通过游戏内验收。
 
 ### 阶段 B 实际自动化结果
 
@@ -225,3 +233,100 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/api/agent/skills/exec
 - Node.js 全量 153 项通过，新增实体类型解析测试，旧功能回归通过。
 - 新增真实 Node HTTP 搜索→站位→导航→复查链路测试；世界是受控测试对象，没有连接 Minecraft。
 - Python compileall 与 PowerShell 解析器语法检查通过。未请求付费 LLM API。
+
+## 阶段 C：gather_resource
+
+第二个 Skill 已注册，独立目录为 `agent/skills/gather_resource/`，包含 SKILL.md、metadata.py、SOP.md、skill.py 和 __init__.py。说明文件中的 name 使用 `gather-resource`；HTTP 和 Python 名称使用 `gather_resource`。辅助资源暂不添加。
+
+入口继续使用 `POST /api/agent/skills/execute`，进度和取消沿用现有接口，没有新增依赖、后台队列、LLM 调用或 Planning。执行时复用原租约、心跳、回执和停止行为。
+
+### 输入与执行过程
+
+| 参数 | 约定 |
+| --- | --- |
+| resource | 必填，要入包的物品，如 oak_log、sand、cobblestone、raw_iron |
+| count | 必填，整数 1～64，背包目标总数，先扣除已有物品 |
+| block_name | 可选，限定来源方块，经过运行时名称/来源校验 |
+| tool_name | 可选，指定背包中的工具，由既有 mine_block 校验并使用 |
+| search_radius | 默认 16，整数 1～16，初始位置周围的三维目标范围 |
+| max_blocks | 默认 16，整数 1～64，最多尝试的不同方块数，包含跳过/失败候选 |
+
+最小请求：
+
+```json
+{
+  "player": "Steve",
+  "request_id": "gather-oak-001",
+  "skill": "gather_resource",
+  "arguments": {"resource": "oak_log", "count": 4},
+  "timeout_seconds": 300,
+  "max_tool_calls": 192
+}
+```
+
+工具顺序：`resolve_resource(item)` → 读取背包计算缺口 → `inspect_mining_sources` → `find_block` → 必要时 `find_interaction_positions` / `goto_position` / `get_movement_task` → `inspect_block` → `mine_block` → 检查被动拾取 → 必要时 `collect_item` → 重读背包。未达标时有限重复；最终再读世界快照，验证真实背包总数及维度。
+
+新增 Node 只读工具 `inspect_mining_sources(item_name, block_name?, max_results?)`，从当前运行时 registry 的 drops 查询可能来源，兼容已核对的数字和对象格式。只遍历注册定义，不扫描世界。输出 sources、available、truncated、source、lootRulesVerified；max_results 默认 16、范围 1～16。Python 最多考虑 4 种来源，未使用的候选会标记截断。没有增加第二份物品别名或静态掉落表。
+
+### 手动测试命令
+
+沿用原一键启动器，重启 Node 和 Python 加载新增工具与 Skill；不需要 npm/pip 安装。以下命令分别执行，Steve 换成实际游戏昵称：
+
+```powershell
+Set-Location 'D:\桌面\MineMate'
+```
+
+凑齐背包 4 个橡木原木：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-gather-skill.ps1 -Player Steve -Resource oak_log -Count 4
+```
+
+采集沙子：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-gather-skill.ps1 -Player Steve -Resource sand -Count 3
+```
+
+指定从石头挖圆石，使用背包中的铁镐：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-gather-skill.ps1 -Player Steve -Resource cobblestone -BlockName stone -ToolName iron_pickaxe -Count 3
+```
+
+采集粗铁，自动查询当前版本可能的矿石来源：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-gather-skill.ps1 -Player Steve -Resource raw_iron -Count 3
+```
+
+脚本默认执行预算 300 秒、192 次工具调用，每 0.5 秒查询进度，显示 stage、inventory、mined 和 calls。自定义端口可添加 `-AgentUrl`。Ctrl+C 尽力取消自己的执行，也可在游戏发送「停止」。脚本不接入 LLM，直接在游戏里说“采集四个木头”尚不保证选择这个 Skill。
+
+数据与限制详见 [SKILL.md](../../agent/skills/gather_resource/SKILL.md) 和 [SOP.md](../../agent/skills/gather_resource/SOP.md)：
+
+- 每个目标按坐标去重；初始/挖前的脚下支撑都禁止。不可达、方块变化、无视线可有限换候选；缺工具、满背包或未知结果停止。
+- mine_block 只证明方块移除。先检查是否已经自动拾取，必要时 collect_item；只有 ITEM_ENTITY_MISSING 可短暂重查，最多 5 次、间隔 0.25 秒。未确认背包增加则 uncertain，不继续破坏更多资源。
+- 来源只是静态注册表的可能掉落。精准采集、时运、模组或数据包可能改变实际结果，以实际背包为准。没有可靠来源时返回 MINING_SOURCE_UNKNOWN/MISMATCH。
+- 背包满由拾取工具检查，当前没有完整的挖前容量预检；失败时已经挖出的物品可能仍在地面，不会自动丢弃其它物品腾空间。
+- data 保留 initial_count、current_count、collected（相对初始数量的净增加）、remaining、来源与扫描/截断标记、尝试和挖掘数量；最近 16 条 attempts 用于观察，完整工具账本在 steps。
+- 不探索新路点、不挖隧道、不合成工具，不会为了采集而放置方块或攻击。资源不足或预算耗尽时报告真实缺口，不表示世界中没有资源。
+
+### 真实 Minecraft 验收
+
+1. 在测试世界给 Bot 2 个原木，附近准备至少 2 个可达原木，目标 count=4：应只补足差额，最终背包 ≥4，验证通过。
+2. 背包已达标时再执行同一目标：不移动、不挖掘。使用新的 request_id 才是新任务，重复原 ID 只查原记录。
+3. 把来源放在 8～12 格外，观察接近、挖掘及拾取；Bot 不应把“挖掉”直接当作采集成功。
+4. 让 Bot 站在沙子上，旁边另有可挖沙子：应跳过脚下，选择其它目标；不要取消原有支撑保护。
+5. 分别测试 stone→cobblestone、iron_ore→raw_iron，事先把合适的镐交给 Bot；查看最终物品名正确。
+6. 缺工具、墙挡路、目标被玩家挖掉、资源不够、背包满、玩家抢走掉落物时应明确失败或 uncertain，显示已获数量，不无限重挖。
+7. 接近/挖掘/拾取途中发「停止」、取消或断线：确认后续工具终止，重连不恢复旧任务。
+8. 回归搜索 Skill、你好/状态/背包/附近/环境，以及跟随/停止/坐标导航和旧 Tool Calling。
+
+尚未有真实 Minecraft 会话用于以上验收，不将自动化测试通过视为游戏测试通过。合成、熔炼 Skill 留待后续阶段。
+
+### 阶段 C 实际自动化结果
+
+- Python 全量：152 项通过，其中新采集 Skill 22 项；已有搜索/执行器/聊天测试继续通过。
+- Node.js 全量：156 项通过，其中新增采集来源查询 3 项，使用真实 1.21.4 注册数据核对圆石、粗铁来源。
+- 真实 Node 进程 + HTTP 注册表/租约 + 原站位/挖掘/拾取工具的链路测试通过；游戏数据为受控模拟，未连接 Minecraft。
+- Python 编译检查、PowerShell 测试脚本语法检查、Skill frontmatter 名称检查通过；未调用付费 LLM API。

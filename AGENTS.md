@@ -138,5 +138,6 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 - Skill 与显式后台工具序列共用 `TaskManager` 的执行槽、租约、心跳、账本、回执与取消；禁止另建争用 Bot 的独立任务队列。Skill 不得创建脱离执行器生命周期的后台任务，不得绕过 ToolClient 操作 Minecraft。
 - `execute()` 返回的数据不是成功凭证。`verify()` 必须对实际执行前后快照检查所有 `success_criteria`，提供结构化证据；失败或不确定结果不得标为 completed。Skill 内部使用确定性程序，不逐个工具调用 LLM。
 - 同一玩家的 `request_id` 在后台工具任务和 Skill 中共享幂等范围，最多保留 64 个内存记录。停止、死亡、换维度、断线和 Node 重启后，不得续跑失效租约；不提供跨重启自动恢复。
-- 生产 Skill 统一由 `agent/skills/catalog.py` 注册。已实现 A 基础设施和 B `explore_and_find`，后续按 C 采集、D 合成、E 熔炼、F LLM 集成与真实游戏验收逐步推进；具体合同、风险与验收见 `docs/tasks/task0065-skills.md`。Mock/回环 HTTP 测试不等同于 Minecraft 验收。
+- 生产 Skill 统一由 `agent/skills/catalog.py` 注册。已实现 A 基础设施、B `explore_and_find` 和 C `gather_resource`，后续按 D 合成、E 熔炼、F LLM 集成与真实游戏验收逐步推进；具体合同、风险与验收见 `docs/tasks/task0065-skills.md`。Mock/回环 HTTP 测试不等同于 Minecraft 验收。
 - 搜索使用三维距离、有限已加载范围、有限路点和候选站位；只读搜索不得移动。接近复用原导航，并重新确认同一坐标/实体 ID 和最终距离。不得把“未发现”表述为整个世界没有资源。进度通过 `report_progress()` 写入有界执行记录；失败仍保留搜索范围、路点与真实工具账本。
+- `gather_resource.count` 是背包目标总数，先扣除已有数量。采集来源通过 Node 只读工具 `inspect_mining_sources` 查询运行时 drops，不得在 Python 硬编码掉落表；来源只是可能结果，附魔/数据包仍须以真实背包验证。挖掘与拾取分别核验；脚下支撑/已尝试坐标跳过，无实体只能有界短查，未知结果不得继续挖掘。当前初始搜索半径最多 16 格，不自动合成工具或全局探索。

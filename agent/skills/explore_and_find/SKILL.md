@@ -66,7 +66,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-explore-skill
 搜索并接近牛：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-explore-skill.ps1 -Player Steve -TargetKind entity -Target cow -Approach
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-explore-skill.ps1 -Player Steve-TargetKind entity -Target cow -Approach
 ```
 
 `resolve_resource` → `find_entity` 搜索并复查 → `goto_position` → `get_movement_task` → `find_entity` 复查同一 ID → 核验距离。接近前还会刷新实体位置；最多主动接近两次。

@@ -2,6 +2,7 @@ const { object, text, number, position } = require('../schema');
 const { ensure, blockAt, vector, distance, plainPosition, count, items, usable, state } = require('../common');
 
 function registerMining(registry) {
+  require('./sources')(registry);
   registry.register({ name: 'inspect_block', description: '只读查询明确坐标的实际方块名称、距离和可挖/可见情况；用于挖掘前识别目标，不检查放置。', mutates: false,
     parameters: object({ position }),
     execute(ctx, a) {

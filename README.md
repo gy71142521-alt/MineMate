@@ -2,15 +2,17 @@
 
 Minecraft Java Edition AI 玩伴。Node.js 负责游戏控制，Python Agent 负责模型与工具调用。详细配置、认证、接口和游戏验收见 [Minecraft Bot 文档](minecraft-bot/README.md)。
 
-查看 [现有工具使用指南](docs/tools-guide.md)：完整列出 34 个工具的能力、参数示例、前置条件、数量/距离限制、组合流程及常见错误。
+查看 [现有工具使用指南](docs/tools-guide.md)：列出当前 36 个工具的能力、参数示例、前置条件、数量/距离限制、组合流程及常见错误。
 
 物品和方块名称不再由 Python 维护静态别名。涉及资源的自然语言请求会先调用 Node.js 的 `resolve_resource`，从当前 Mineflayer 运行时 registry（包括已加载的模组内容）返回候选；候选不唯一时先澄清，复杂任务仍需后续 Skill 和 Planning。
 
 Planning 前置接口已补齐：移动终态、配方/交互站位查询、后台显式工具序列、熔炼续接、整任务租约和执行回执。新增接口、请求示例和游戏验收见 [Task 007 前置衔接说明](docs/tasks/task007-preparation.md)。当前尚未接入 LLM 自动计划生成或重新规划；原自然语言消息接口保持 Task 006 行为。
 
-Task 006.5 已实现阶段 A 基础设施及阶段 B 的 `explore_and_find`：可搜索方块/实体类型，选择有限路点探索及接近目标，并通过真实工具结果和最终距离核验。测试脚本可直接调用 Skill、显示进度和完整工具账本，操作示例见 [Skill 实施与测试说明](docs/tasks/task0065-skills.md#阶段-bexplore_and_find)。其余三个业务 Skill 与自然语言选择 Skill 尚未接入。无需新增依赖或修改现有 `.env`。
+Task 006.5 已实现阶段 A 基础设施、阶段 B 的 `explore_and_find` 和阶段 C 的 `gather_resource`：前者搜索与接近，后者查询真实采集来源，组合挖掘、拾取并核验背包目标总数。测试脚本可直接调用 Skill、显示进度和完整工具账本，操作示例见 [Skill 实施与测试说明](docs/tasks/task0065-skills.md)。合成、熔炼 Skill 与自然语言选择 Skill 尚未接入。无需新增依赖或修改现有 `.env`。
 
 业务 Skill 按“一技能一目录”组织。首个技能的 [SKILL.md](agent/skills/explore_and_find/SKILL.md) 提供用途、输入与测试命令，[SOP.md](agent/skills/explore_and_find/SOP.md) 记录工具顺序和验收；同目录 `metadata.py` 是运行时元数据及参数的唯一代码来源，`skill.py` 实现执行。当前暂不添加辅助资源，说明文件尚未接入 LLM。
+
+第二个技能见 [gather_resource 技能说明](agent/skills/gather_resource/SKILL.md) 和 [采集 SOP](agent/skills/gather_resource/SOP.md)。例如在根目录运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-gather-skill.ps1 -Player Steve -Resource oak_log -Count 4`：背包已有数量会扣除，达到总数 4 才成功；请将 Steve 换成实际昵称，并先重启 Node/Python 服务。
 
 ## 临时测试启动器（Windows）
 
