@@ -2,6 +2,7 @@ const { createRegistry } = require('./registry');
 const { object, number } = require('./schema');
 const { ensure, state } = require('./common');
 const { navigate } = require('./movement/navigation');
+const { registerResourceTools } = require('./perception/resources');
 
 function createToolSystem(bot, options = {}) {
   const registry = createRegistry(bot, options);
@@ -23,6 +24,7 @@ function createToolSystem(bot, options = {}) {
   require('./movement/tools')(registry);
   require('./movement/queries')(registry);
   require('./movement/standing')(registry);
+  registerResourceTools(registry);
   require('./crafting/recipes')(registry);
   registry.register({ name: 'stop_movement', description: '最高优先级：取消正在执行的工具并停止移动。', parameters: object(), priority: true,
     execute: ({ movement, username }) => movementResult(movement.stop(username), false) });

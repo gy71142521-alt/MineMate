@@ -1,6 +1,8 @@
 # Task 007 前置衔接：执行接口与验收
 
-本轮补齐 Task 006 与后续 Planning 之间的执行能力。没有实现 LLM Planner、依赖图生成、Replanner、长期记忆，也没有新增依赖。Task 007 的三个完整自主任务尚未宣布完成。
+本轮补齐 Task 006 与后续 Planning 之间的执行能力，并完成第一阶段动态资源解析。没有实现 LLM Planner、依赖图生成、Replanner、长期记忆，也没有新增依赖。Task 007 的三个完整自主任务尚未宣布完成。
+
+第一阶段动态解析入口是 Node 工具 `resolve_resource`，实现位于 `minecraft-bot/src/tools/perception/resources.js`。它只读取当前运行时 `itemsByName` 和 `blocksByName`，支持模组注册内容，返回候选并标记歧义。Python 不再维护物品别名或改写工具参数；模型必须先解析，再使用返回的真实 ID。`agent/app/semantic.py` 仅保留不猜测资源的兼容辅助函数，不执行 Skill、不替代真实快照和工具验证。
 
 ## 调用关系
 

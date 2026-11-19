@@ -1,6 +1,7 @@
 // 有限 JSON Schema 子集；目录定义是唯一来源，两端只实现通用校验器。
 const number = (minimum, maximum, integer = false) => ({ type: integer ? 'integer' : 'number', minimum, maximum });
-const text = { type: 'string', minLength: 1, maxLength: 64, pattern: '^[a-z][a-z0-9_]*$' };
+// 允许模组资源的 namespace:path 及路径中的连字符；最终名称仍由运行时 registry 校验。
+const text = { type: 'string', minLength: 1, maxLength: 64, pattern: '^[a-z][a-z0-9_.:/-]*$' };
 const object = (properties = {}, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
 const position = object({ x: number(-29999984, 29999984, true), y: number(-2048, 2047, true), z: number(-29999984, 29999984, true) });
 function validate(schema, value) {

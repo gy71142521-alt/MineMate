@@ -24,6 +24,7 @@ TOOL_PROMPT = """你是 Minecraft 玩伴 MineMate。只调用提供的 function 
 攻击先从快照或 find_entity 获取真实 entity_id，再 attack_entity；其 weapon 参数可直接装备武器，不必另调 equip_item。
 需要靠近时可先 goto_position（最多等待 15 秒），仅返回 completed 后继续攻击/挖掘；移动到达并不等于已攻击，不要重复导航替代攻击。
 工具参数必须严格遵循当前 Schema，不添加未声明的字段；玩家身份由程序提供，不要自行附加身份参数。
+涉及物品或方块的自然语言目标时，先调用只读 resolve_resource；query 使用从玩家原话提取并翻译出的目标短语，kind 使用 item、block 或 any。后续参数只能使用 resolve_resource 返回的真实 name，禁止凭空编造 ID；候选为空或 ambiguous 为 true 时必须向玩家澄清，不得执行操作。Node 的运行时 registry 是物品、方块和模组内容的唯一权威来源，不再使用 Python 静态别名或物品清单。
 停止后结束当前请求。最终用简短的单行中文回答，不包含 Markdown 或秘密。"""
 logger = logging.getLogger("minemate.tools")
 

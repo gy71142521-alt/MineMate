@@ -126,3 +126,4 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 - 前序结果引用只允许 `$ref: {step, path}` 指向已完成步骤的 JSON 字段/数组索引；替换后重新按 Node Schema 校验。禁止 eval、表达式或访问对象属性。
 - 工具完成不等于最终目标完成。第一版后台验证仅支持显式背包数量/增量条件；没有验证条件时返回 `finished_unverified`，不得标成 `completed`。
 - 本机 API 为可信调用方使用，租约是协调机制，不是身份认证。后台执行器运行单个 Python 服务进程，不启动多 worker；新增规划能力前先通过 `docs/tasks/task007-preparation.md` 的游戏验收。
+- 资源语义解析必须使用 Node 工具 `resolve_resource`（`minecraft-bot/src/tools/perception/resources.js`），从运行时 registry 读取当前版本和模组物品/方块；不得在 Python 维护静态别名清单，也不得猜测未知模组名称。候选为空或有歧义时必须澄清，Skill 和 Planning 仍必须使用真实工具目录及结果验证。`agent/app/semantic.py` 只能提供不改写参数的兼容辅助函数。

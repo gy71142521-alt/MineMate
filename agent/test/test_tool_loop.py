@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import unittest
 import shutil
@@ -51,6 +51,30 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history[-1]["role"], "tool")
         self.assertEqual(history[-1]["tool_call_id"], "call1")
         self.assertEqual(json.loads(history[-1]["content"]), client.execute.return_value)
+
+    async def test_runtime_resource_resolution_is_returned_before_resource_action(self):
+        resolver = {"type": "object", "properties": {
+            "query": {"type": "string", "minLength": 1, "maxLength": 64},
+            "kind": {"type": "string", "enum": ["item", "block", "any"]}},
+            "required": ["query", "kind"], "additionalProperties": False}
+        craft = {"type": "object", "properties": {
+            "item_name": {"type": "string", "minLength": 1, "maxLength": 64}},
+            "required": ["item_name"], "additionalProperties": False}
+        loop, llm, client = self.fixture([
+            call("resolve_resource", {"query": "iron helmet", "kind": "item"}),
+            call("craft_item", {"item_name": "iron_helmet"}, identity="call2"),
+            {"content": "已确认目标。"},
+        ])
+        client.catalog.return_value = ({
+            "resolve_resource": {"name": "resolve_resource", "description": "resolve", "parameters": resolver},
+            "craft_item": {"name": "craft_item", "description": "craft", "parameters": craft}}, 7)
+        client.execute.side_effect = [
+            {"success": True, "tool": "resolve_resource", "data": {"status": "completed", "candidates": [{"name": "iron_helmet"}], "ambiguous": False}, "error": None},
+            {"success": True, "tool": "craft_item", "data": {"status": "completed"}, "error": None},
+        ]
+        await loop.run(MessageRequest(player="Steve", message="合成铁头盔"))
+        self.assertEqual([item.args[0] for item in client.execute.await_args_list], ["resolve_resource", "craft_item"])
+        self.assertEqual(client.execute.await_args_list[1].args[1]["item_name"], "iron_helmet")
 
     async def test_movement_modes_then_follow_use_boolean_arguments_and_real_results(self):
         loop, llm, client = self.fixture([

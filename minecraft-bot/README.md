@@ -2,7 +2,7 @@
 
 > 当前能力请先看 [34 个游戏工具使用指南](../docs/tools-guide.md)，包含聊天入口、参数、执行结果、熔炉占用等限制，以及与后续 Planning 的边界。
 
-> Planning 前置衔接已新增后台执行接口和 4 个查询工具（注册目录共 34 项）。详见 [接口、示例及验收说明](../docs/tasks/task007-preparation.md)。本次不生成 LLM 计划，原 Task 006 消息循环保留原有请求时限；长任务请提交新后台 API。
+> Planning 前置衔接已新增后台执行接口和查询工具。资源名称解析由注册目录中的 `resolve_resource` 负责，直接读取运行时 registry；详见 [接口、示例及验收说明](../docs/tasks/task007-preparation.md)。本次不生成 LLM 计划，原 Task 006 消息循环保留原有请求时限；长任务请提交新后台 API。
 
 > Task 006 的新工具系统说明见本文末尾；此前 Task 001～005 各节保留阶段历史。
 
@@ -623,7 +623,7 @@ agent/app/
 └── check_tool_calling.py   # 无游戏副作用的手动协议探测
 ```
 
-玩家自然语言 → Node 聊天分流 → Python `/api/agent/message` → 获取 Node 工具目录和世界快照 → LLM 返回 `tool_calls` → Python 校验 → Node 再次校验并执行 → 真实结果以 `role=tool` 和 `tool_call_id` 回传模型 → Minecraft 文本回复。Python 不直接操作游戏，也不维护另一套游戏工具定义。
+玩家自然语言 → Node 聊天分流 → Python `/api/agent/message` → 获取 Node 工具目录和世界快照 → 对物品/方块先调用只读 `resolve_resource` → LLM 返回后续 `tool_calls` → Python 校验 → Node 再次校验并执行 → 真实结果以 `role=tool` 和 `tool_call_id` 回传模型 → Minecraft 文本回复。Python 不直接操作游戏，也不维护另一套游戏工具定义。
 
 Task 002 移动与 Task 003 感知实现已迁入统一目录，旧导入路径仍导出同一模块。聊天与原 `/api/movement/*`、`/api/world` 接口继续复用相同实例。非移动动作开始前停止原移动；移动模式和单次跳跃复用当前移动目标。异步修改工具互斥，本地“停止”优先取消，不等待 LLM。
 
