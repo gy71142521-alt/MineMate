@@ -19,3 +19,10 @@ agent/**/__pycache__/
 .pytest_cache/
 
 .venv
+
+# 本地记忆数据库包含玩家对话内容，不得提交
+data/
+agent/data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

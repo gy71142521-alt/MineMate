@@ -141,3 +141,14 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 - 生产 Skill 统一由 `agent/skills/catalog.py` 注册。已实现 A 基础设施、B `explore_and_find` 和 C `gather_resource`，后续按 D 合成、E 熔炼、F LLM 集成与真实游戏验收逐步推进；具体合同、风险与验收见 `docs/tasks/task0065-skills.md`。Mock/回环 HTTP 测试不等同于 Minecraft 验收。
 - 搜索使用三维距离、有限已加载范围、有限路点和候选站位；只读搜索不得移动。接近复用原导航，并重新确认同一坐标/实体 ID 和最终距离。不得把“未发现”表述为整个世界没有资源。进度通过 `report_progress()` 写入有界执行记录；失败仍保留搜索范围、路点与真实工具账本。
 - `gather_resource.count` 是背包目标总数，先扣除已有数量。采集来源通过 Node 只读工具 `inspect_mining_sources` 查询运行时 drops，不得在 Python 硬编码掉落表；来源只是可能结果，附魔/数据包仍须以真实背包验证。挖掘与拾取分别核验；脚下支撑/已尝试坐标跳过，无实体只能有界短查，未知结果不得继续挖掘。当前初始搜索半径最多 16 格，不自动合成工具或全局探索。
+
+## 12. 记忆与上下文（Memory）
+
+- 会话事件日志是唯一真源：`turn/*`、`step/*`、`user/message`、`assistant/message`、`tool/call`、`tool/result` 与 `compaction/*` 仅追加；LLM 消息历史必须由 `Session.derive_messages()` 派生，禁止再维护第二份对话历史。
+- 每个玩家一个会话，按玩家串行化 turn；同一玩家不得同时存在两个进行中的 turn。`MessageHandler` 的 `PLAYER_BUSY` 与 `MemoryManager` 的锁共同保证这一点。
+- 系统提示、压缩摘要和最近历史进入模型可见 surface；当前世界快照与本地时间作为**不持久化**的临时上下文追加，不写入事件日志。
+- 压缩只选择当前 turn 之前、已结束且未被最新摘要遮蔽的完整 turn；不得拆开 `assistant/message` 与其 `tool/result`。原始事件不删除，由 `compaction/summary.shadowed_seqs` 将其移出 surface。
+- 持久化使用项目根目录 `data/minemate-memory.sqlite3`（`MEMORY_DB_PATH` 可覆盖）；事件写入必须校验 seq 连续并在事务中提交。数据库损坏、磁盘失败或压缩失败只能降级记忆，不得阻断游戏聊天。
+- 加载会话时必须修复残留的 step/turn/compaction 标记；不完整的工具调用块不得发送给模型。修改事件表结构需提升 `MEMORY_FORMAT_VERSION` 并提供迁移或明确拒绝旧库。
+- 新增 context 贡献、摘要器或存储后端时，必须保持 `EventStore`、`Summarizer` 接口可替换，并补充 `agent/test/test_memory.py` 或对应测试；Mock/回环测试不等同于 Minecraft 验收。
+- 记忆当前只在 `TOOL_CALLING_ENABLED=true` 的 Tool Calling 路径生效；旧意图模式保持原行为，若要接入必须先设计其上下文格式与回滚策略。

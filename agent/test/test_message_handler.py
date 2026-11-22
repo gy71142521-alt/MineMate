@@ -81,6 +81,26 @@ class MessageHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.active, 0)
         self.assertEqual(llm.complete.await_count, 1)
 
+    async def test_same_player_cannot_run_two_turns_concurrently(self):
+        handler, llm = self.handler(output(), llm_max_concurrent=2)
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def blocked(*_):
+            started.set()
+            await release.wait()
+            return output()
+
+        llm.complete.side_effect = blocked
+        pending = asyncio.create_task(handler.handle(MessageRequest(player="Steve", message="first")))
+        await started.wait()
+        with self.assertRaises(LLMError) as error:
+            await handler.handle(MessageRequest(player="Steve", message="second"))
+        self.assertEqual(error.exception.code, "PLAYER_BUSY")
+        release.set()
+        await pending
+        self.assertEqual(llm.complete.await_count, 1)
+        self.assertNotIn("steve", handler.active_players)
+
     async def test_global_limit_cooldown_and_window_reset(self):
         handler, llm = self.handler(output(), llm_requests_per_minute=2)
         now = [0.0]

@@ -38,6 +38,19 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_settings({name: value})
 
+    def test_memory_configuration_is_bounded(self):
+        settings = load_settings({})
+        self.assertTrue(settings.memory_enabled)
+        self.assertIn("minemate-memory.sqlite3", settings.memory_db_path)
+        self.assertEqual(settings.memory_context_window, 32768)
+        self.assertEqual(load_settings({"MEMORY_ENABLED": "false"}).memory_enabled, False)
+        for name, value in [("MEMORY_CONTEXT_WINDOW", "0"), ("MEMORY_COMPACTION_THRESHOLD", "1.5"),
+                            ("MEMORY_RETAIN_TURNS", "0"), ("MEMORY_MAX_SUMMARY_CHARS", "100"),
+                            ("MEMORY_MAX_TOOL_RESULT_CHARS", "99999"), ("MEMORY_SESSION_IDLE_DAYS", "-1")]:
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    load_settings({name: value})
+
     def test_tool_output_budget_is_independent_and_bounded(self):
         self.assertEqual(load_settings({}).tool_llm_max_tokens, 2048)
         self.assertEqual(load_settings({"TOOL_LLM_MAX_TOKENS": "4096"}).tool_llm_max_tokens, 4096)

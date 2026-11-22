@@ -4,6 +4,8 @@ Minecraft Java Edition AI 玩伴。Node.js 负责游戏控制，Python Agent 负
 
 日志的级别、请求 ID、脱敏规则和常见错误码排查见 [日志与诊断说明](docs/logging.md)。
 
+Agent 的事件日志、按玩家隔离的上下文、压缩摘要、SQLite 持久化与恢复语义见 [记忆与上下文说明](docs/memory.md)。
+
 查看 [现有工具使用指南](docs/tools-guide.md)：完整列出 34 个工具的能力、参数示例、前置条件、数量/距离限制、组合流程及常见错误。
 
 物品和方块名称不再由 Python 维护静态别名。涉及资源的自然语言请求会先调用 Node.js 的 `resolve_resource`，从当前 Mineflayer 运行时 registry（包括已加载的模组内容）返回候选；候选不唯一时先澄清，复杂任务仍需后续 Skill 和 Planning。

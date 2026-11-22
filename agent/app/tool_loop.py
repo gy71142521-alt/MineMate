@@ -11,6 +11,7 @@ from . import diagnostics
 from .config import Settings
 from .intent import IntentBase, MessageRequest, redact
 from .llm_client import LLMClient, LLMError
+from .memory.manager import MemoryManager, MemoryTurn
 from .tool_client import ToolClient, validate
 
 
@@ -177,8 +178,9 @@ def display_reply(value: object) -> str:
 
 
 class ToolLoop:
-    def __init__(self, settings: Settings, llm: LLMClient, client: ToolClient):
-        self.settings, self.llm, self.client = settings, llm, client
+    def __init__(self, settings: Settings, llm: LLMClient, client: ToolClient,
+                 memory: MemoryManager | None = None):
+        self.settings, self.llm, self.client, self.memory = settings, llm, client, memory
 
     async def run(self, request: MessageRequest) -> dict:
         if not self.settings.llm_api_key or not self.settings.llm_model:
@@ -193,6 +195,9 @@ class ToolLoop:
         call = None
         skipped_any = False
         last_response = None
+        memory_turn: MemoryTurn | None = None
+        memory_reason = "error"
+        step: int | None = None
         started = time.monotonic()
         try:
             async with asyncio.timeout(self.settings.tool_calling_timeout):
@@ -201,13 +206,35 @@ class ToolLoop:
                     raise LLMError(409, "STALE_TASK", "这条消息已被停止或新的移动任务替换。")
                 snapshot = await self.client.request("GET", "/api/world")
                 tools = [{"type": "function", "function": {key: definition[key] for key in ("name", "description", "parameters")}} for definition in catalog.values()]
-                messages = [{"role": "system", "content": TOOL_PROMPT}, {"role": "user", "content": json.dumps({
+                fallback_messages = [{"role": "system", "content": TOOL_PROMPT}, {"role": "user", "content": json.dumps({
                     "player": request.player, "message": request.message, "world": snapshot
                 }, ensure_ascii=False)}]
+                if self.memory is not None:
+                    started_turn = await self._memory_safe(
+                        "begin_turn", self.memory.begin_turn(
+                            request.player, request.message, system_prompt=TOOL_PROMPT))
+                    if isinstance(started_turn, MemoryTurn):
+                        memory_turn = started_turn
+                messages = fallback_messages
+                if memory_turn is not None:
+                    remembered = await self._memory_safe(
+                        "build_context",
+                        self.memory.build_context(memory_turn, TOOL_PROMPT, snapshot, tools),
+                    )
+                    if remembered is not None:
+                        messages = remembered
+                    else:
+                        await self._end_memory(memory_turn, "error")
+                        memory_turn = None
                 ids, results = set(), []
                 terminal = False
                 for index in range(self.settings.tool_max_calls + 1):
                     final = terminal or calls_made >= self.settings.tool_max_calls
+                    step = None
+                    if memory_turn is not None:
+                        started_step = await self._memory_safe("start_step", self.memory.start_step(memory_turn))
+                        if type(started_step) is int:
+                            step = started_step
                     response = await self.llm.tool_completion(messages, tools, final=final)
                     last_response = response
                     stage = "MODEL_MESSAGE"
@@ -249,7 +276,16 @@ class ToolLoop:
                             reply = "前序操作未完成，同批后续调用未执行；请查询游戏状态后再继续。"
                         logger.info("[Tools] 回复完成 calls=%d reply_len=%d elapsed_ms=%d",
                                     calls_made, len(reply), int((time.monotonic() - started) * 1000))
-                        return {"intent": "conversation", "arguments": {}, "reply": redact(reply, self.settings.llm_api_key)}
+                        final_reply = redact(reply, self.settings.llm_api_key)
+                        memory_reason = "completed"
+                        if memory_turn is not None:
+                            if step is not None:
+                                await self._memory_safe(
+                                    "record_final",
+                                    self.memory.record_assistant(memory_turn, final_reply, []),
+                                )
+                            await self._memory_safe("end_turn", self.memory.end_turn(memory_turn, "completed"))
+                        return {"intent": "conversation", "arguments": {}, "reply": final_reply}
                     if final:
                         raise LLMError(409, "TOOL_CALL_LIMIT", "本次工具调用已结束或达到上限。")
                     stage = "PARALLEL_TOOL_CALLS"
@@ -294,8 +330,20 @@ class ToolLoop:
                         logger.info("[Tools] 批量工具调用 count=%d names=%s",
                                     len(parsed), ",".join(item[1] for item in parsed))
                     # 玩家身份来自请求，由程序传递，不接受模型指定另一名玩家。
+                    tool_call_payload = [item[0].model_dump() for item in parsed]
+                    if memory_turn is not None and step is not None:
+                        await self._memory_safe(
+                            "record_assistant",
+                            self.memory.record_assistant(memory_turn, None, tool_call_payload),
+                        )
+                        for item in parsed:
+                            await self._memory_safe(
+                                "record_tool_call",
+                                self.memory.record_tool_call(
+                                    memory_turn, item[0].id, item[1], item[0].function.arguments),
+                            )
                     messages.append({"role": "assistant", "content": None,
-                                     "tool_calls": [item[0].model_dump() for item in parsed]})
+                                     "tool_calls": tool_call_payload})
                     terminal = False
                     for position, (current, name, arguments) in enumerate(parsed):
                         ids.add(current.id)
@@ -312,6 +360,11 @@ class ToolLoop:
                                     name, result["success"], result["data"].get("status") if result["data"] else None,
                                     error_code or "-", int((time.monotonic() - tool_started) * 1000), calls_made)
                         results.append(result)
+                        if memory_turn is not None and step is not None:
+                            await self._memory_safe(
+                                "record_tool_result",
+                                self.memory.record_tool_result(memory_turn, current.id, name, result),
+                            )
                         messages.append({"role": "tool", "tool_call_id": current.id,
                                          "content": json.dumps(result, ensure_ascii=False)})
                         terminal = (not result["success"]
@@ -325,16 +378,26 @@ class ToolLoop:
                                                skipped_name, request_id)
                                 skipped = {"success": False, "tool": skipped_name, "data": None,
                                            "error": {"code": "NOT_EXECUTED", "message": "前序操作未完成，未执行此调用。"}}
+                                if memory_turn is not None and step is not None:
+                                    await self._memory_safe(
+                                        "record_skipped",
+                                        self.memory.record_tool_result(
+                                            memory_turn, skipped_call.id, skipped_name, skipped),
+                                    )
                                 messages.append({"role": "tool", "tool_call_id": skipped_call.id,
                                                  "content": json.dumps(skipped, ensure_ascii=False)})
                             break
+                    if memory_turn is not None and step is not None:
+                        await self._memory_safe("end_step", self.memory.end_step(memory_turn))
                 raise LLMError(409, "TOOL_CALL_LIMIT", "工具调用达到上限。")
         except asyncio.CancelledError:
+            memory_reason = "cancelled"
             logger.info("[Tools] 请求被取消 stage=%s executing=%s pending=%s calls=%d", stage, executing, pending_action, calls_made)
             if executing or pending_action:
                 await self._cancel(request.player, request_id)
             raise
         except (TimeoutError, LLMError) as error:
+            memory_reason = "timeout" if not isinstance(error, LLMError) else "error"
             elapsed = int((time.monotonic() - started) * 1000)
             if isinstance(error, LLMError):
                 logger.warning("[Tools] 工具循环失败 code=%s status=%d stage=%s executing=%s pending=%s calls=%d elapsed_ms=%d",
@@ -348,6 +411,7 @@ class ToolLoop:
                 raise
             raise LLMError(504, "TOOL_LOOP_TIMEOUT", "本次工具调用超时，结果需要重新查询。") from error
         except (ValueError, TypeError, KeyError, RecursionError) as error:
+            memory_reason = "error"
             if isinstance(error, ToolOutputError):
                 diagnostics.log_error(
                     logger, "[Tools] 模型输出校验失败", error,
@@ -384,6 +448,26 @@ class ToolLoop:
             if isinstance(error, ValidationError):
                 raise LLMError(502, "INVALID_TOOL_CALL", "模型返回了无效工具调用或回复，已拒绝继续执行；此前操作请查询状态。") from None
             raise LLMError(502, "INVALID_TOOL_CALL", "模型返回了无效工具调用或回复，已拒绝继续执行；此前操作请查询状态。") from error
+        finally:
+            if memory_turn is not None:
+                await self._end_memory(memory_turn, memory_reason)
+
+    async def _memory_safe(self, label: str, operation):
+        try:
+            return await operation
+        except Exception as error:
+            logger.warning("[Tools] 记忆操作失败 label=%s error=%s", label, type(error).__name__)
+            return None
+
+    async def _end_memory(self, turn: MemoryTurn, reason: str) -> None:
+        if self.memory is None or turn.closed:
+            return
+        try:
+            # Do not let a cancellation of the chat request discard the durable turn close.
+            await asyncio.shield(self.memory.end_turn(turn, reason))
+        except BaseException as error:
+            logger.warning("[Tools] 关闭记忆轮次失败 reason=%s error=%s",
+                           reason, type(error).__name__)
 
     async def _cancel(self, player: str, request_id: str | None) -> None:
         try:

@@ -30,6 +30,7 @@ class MessageHandler:
         self.window_start = clock()
         self.window_count = 0
         self.players: dict[str, float] = {}
+        self.active_players: set[str] = set()
         self.tool_loop = tool_loop
 
     async def handle(self, request: MessageRequest) -> dict:
@@ -46,9 +47,13 @@ class MessageHandler:
             name = request.player.lower()
             if self.active >= config.llm_max_concurrent:
                 raise LLMError(429, "AGENT_BUSY", "语言模型正在忙，请稍后再试。")
+            # One turn per player: the memory log must not have two open turns.
+            if name in self.active_players:
+                raise LLMError(429, "PLAYER_BUSY", "上一条消息仍在处理中，请稍后再试。")
             if self.window_count >= config.llm_requests_per_minute or name in self.players or len(self.players) >= 512:
                 raise LLMError(429, "AGENT_RATE_LIMITED", "消息过于频繁，请稍后再试。")
             self.active += 1
+            self.active_players.add(name)
             self.window_count += 1
             self.players[name] = now + config.llm_player_cooldown
             logger.info("[Agent] 开始处理 player=%s message_len=%d tool_mode=%s",
@@ -103,6 +108,7 @@ class MessageHandler:
                 raise LLMError(502, "AGENT_ERROR", "消息处理失败，请稍后再试。") from error
             finally:
                 self.active -= 1
+                self.active_players.discard(name)
         finally:
             if token is not None:
                 diagnostics.reset_request_id(token)
