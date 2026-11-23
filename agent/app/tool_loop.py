@@ -12,6 +12,7 @@ from .config import Settings
 from .intent import IntentBase, MessageRequest, redact
 from .llm_client import LLMClient, LLMError
 from .memory.manager import MemoryManager, MemoryTurn
+from .persona import PERSONA_PROMPT, humanize_reply
 from .tool_client import ToolClient, validate
 
 
@@ -22,15 +23,17 @@ TOOL_PROMPT = """你是 Minecraft 玩伴 MineMate。只调用提供的 function 
 只有收到工具的真实结果才能报告结果。pending 表示尚未完成，uncertain 表示无法确认；不得报告成功。
 优先一次调用一个工具；如果模型一次返回多个，程序会按顺序执行，遇到 pending、失败或 uncertain 会停止后续调用。成功后的相同动作可以再次调用（例如连续跳跃），但受总调用次数限制；失败、超时或 pending 后不得重试。没有明确指定目标时先询问，不能猜测挖掘/放置坐标。
 默认不攻击玩家或中立生物、不大范围破坏。长距离交互先导航并告知尚未到达。
-丢弃工具支持任意物品，不按贵重程度拒绝或要求额外确认；ß依据玩家明确指定的名称与数量执行，不自行决定丢弃其他物品。名称或数量不明确时先询问。
-挖掘已指定坐标但不知道方块名称时先 inspect_block，再 mine_block；inspect_placement 仅用于放置，不能代替挖掘检查。
-玩家指定钻石斧等工具时用 mine_block 的 tool_name，不能忽略要求；坐标和方块名必须来自玩家或真实查询结果。
+丢弃工具支持任意物品，不按贵重程度拒绝或要求额外确认；依据玩家明确指定的名称与数量执行，不自行决定丢弃其他物品。名称或数量不明确时先询问。
+挖掘已指定坐标但不知道方块名称时先 inspect_block，再 mine_block；inspect_placement 仅用于放置，不能代替挖掘检查。find_block 只是候选列表，最近的方块不一定能看见或能挖：先看 visible/diggable，visible=false 时先 find_interaction_positions/goto_position 调整站位，再 inspect_block 复核，不要直接 mine_block。
+craft_item 的 position 是“已有工作台”的坐标，不是放置目标；inspect_recipe 返回 requiresTable=false 时必须省略 position。合成后放置使用 inspect_placement → place_block（position/reference_position/face）。制作工作台的顺序是 inspect_recipe(crafting_table) → craft_item(crafting_table, count=1) → inspect_placement → place_block。
+玩家指定钻石斧等工具时用 mine_block 的 tool_name，不能忽略要求；坐标和方块名必须来自玩家或真实查询结果。挖掘后掉落物可能已被自动拾取，先 inspect_inventory 或依据 mine_block 的 sameNameInventoryDelta 判断是否需要 collect_item，不要对不存在的掉落物反复调用。
 攻击先从快照或 find_entity 获取真实 entity_id，再 attack_entity；其 weapon 参数可直接装备武器，不必另调 equip_item。
 需要靠近时可先 goto_position（最多等待 15 秒），仅返回 completed 后继续攻击/挖掘；移动到达并不等于已攻击，不要重复导航替代攻击。
 工具参数必须严格遵循当前 Schema，不添加未声明的字段；玩家身份由程序提供，不要自行附加身份参数。
 熔炉添加/补充原料用 furnace_add_input，添加/补充燃料用 furnace_add_fuel；省略 fuel_name 时由工具按空槽优先煤炭的规则选料。取当前输出整栈用 furnace_take_output，可省略 count；它不支持部分取出。不要为补充操作重复调用要求空炉的 smelt_item(start)。遇到原料/产品冲突应报告炉况，不清空其它工艺的物品；寻找其它熔炉需依据真实查询结果。
 涉及物品或方块的自然语言目标时，先调用只读 resolve_resource；query 使用从玩家原话提取并翻译出的目标短语，kind 使用 item、block 或 any。后续参数只能使用 resolve_resource 返回的真实 name，禁止凭空编造 ID；候选为空或 ambiguous 为 true 时必须向玩家澄清，不得执行操作。Node 的运行时 registry 是物品、方块和模组内容的唯一权威来源，不再使用 Python 静态别名或物品清单。
-停止后结束当前请求。最终用简短的单行中文回答，不包含 Markdown 或秘密。"""
+停止后结束当前请求。最终用简短的单行中文回答，不包含 Markdown 或秘密。
+""" + PERSONA_PROMPT
 logger = logging.getLogger("minemate.tools")
 
 # 单次模型响应最多接受多少个工具调用；超过则视为异常批量，不执行任何调用。
@@ -38,26 +41,26 @@ MAX_CALLS_PER_RESPONSE = 8
 
 # 只展示程序定义的失败原因，避免泛化成“失败”而丢失可操作反馈，也不转发原始错误文本。
 TOOL_FAILURE_REPLIES = {
-    "CANNOT_CONSUME": "Bot 饥饿值已满，普通食物当前不能食用。",
-    "NO_LINE_OF_SIGHT": "Bot 与目标之间存在视线遮挡，请调整站位后再试。",
-    "OUT_OF_RANGE": "目标超出本次工具操作范围，请先靠近目标。",
-    "OCCUPIED": "放置检查发现该位置已有方块；本次未执行挖掘或放置。",
-    "NAVIGATION_FAILED": "导航未完成，后续攻击或挖掘未执行。",
-    "WRONG_TOOL": "指定工具无法采集目标方块，请选择合适的工具。",
-    "TOOL_MISSING": "背包中缺少指定或可采集目标的工具。",
-    "ENTITY_MISSING": "目标实体已失效或超出攻击范围，请重新查询附近实体。",
-    "BLOCK_CHANGED": "目标位置的实际方块与指定名称不符，请重新查询。",
-    "JUMP_FAILED": "未确认完成跳跃；请检查 Bot 是否在地面、头顶是否有空间，并查询当前移动状态。",
-    "FURNACE_INPUT_CONFLICT": "熔炉原料槽已有不同原料，无法混放；请使用其它熔炉。",
-    "FURNACE_OUTPUT_CONFLICT": "熔炉输出槽含有其它工艺的产品，请使用其它熔炉或明确取出后再操作。",
-    "FURNACE_OUTPUT_FULL": "熔炉输出槽已满，请先取出产品，再补充原料。",
-    "FURNACE_INPUT_FULL": "熔炉原料槽剩余空间不足，未减少本次添加数量。",
-    "FURNACE_FUEL_FULL": "熔炉燃料槽剩余空间不足，未减少本次添加数量。",
-    "FURNACE_FUEL_CONFLICT": "燃料槽已有不同燃料，只能同类补充或等待燃料槽清空。",
-    "FUEL_MISSING": "背包中没有煤炭或当前适配器支持的其它燃料。",
-    "UNSUPPORTED_FUEL": "当前适配器尚不支持这种燃料。",
-    "OUTPUT_COUNT_MISMATCH": "取出工具会取当前输出整栈，请查询实际数量，或省略数量取整栈。",
-    "INVENTORY_FULL": "背包空间不足，无法接收本次数量的物品。",
+    "CANNOT_CONSUME": "我现在不饿，吃不下。",
+    "NO_LINE_OF_SIGHT": "被挡住了，我换个位置试试。",
+    "OUT_OF_RANGE": "有点远，我得再靠近点。",
+    "OCCUPIED": "那儿已经有东西了，我没动。",
+    "NAVIGATION_FAILED": "没走过去，后面的事我就没做。",
+    "WRONG_TOOL": "手里的工具不对，弄不了。",
+    "TOOL_MISSING": "背包里没有合适的工具。",
+    "ENTITY_MISSING": "目标不见了，或者已经跑远了。",
+    "BLOCK_CHANGED": "那儿的方块和我想的不一样，我先没动。",
+    "ITEM_ENTITY_MISSING": "地上没看到掉落物，可能已经被我捡起来了。",
+    "WRONG_BLOCK": "那儿不是我要找的方块，我没动。",
+    "WRONG_TABLE": "那儿不是工作台，我没动；要放置的话得另外找地方。",
+    "JUMP_FAILED": "没跳起来，可能脚下或头顶不太方便。",
+    "FURNACE_BUSY": "炉子里还有东西，我先没动。",
+    "FURNACE_INPUT_CONFLICT": "炉子里已经有别的东西了，我另找一座炉子。",
+    "FURNACE_OUTPUT_CONFLICT": "炉子里是其它工艺的产品，我先不动它。",
+    "FURNACE_OUTPUT_FULL": "炉子的产出格满了，得先清一下。",
+    "FURNACE_INPUT_FULL": "炉子的原料格放不下了。",
+    "FURNACE_FUEL_CONFLICT": "燃料格里有别的燃料，我先不混着加。",
+    "FURNACE_FUEL_FULL": "燃料格放不下了。",
 }
 
 
@@ -185,7 +188,7 @@ def display_reply(value: object) -> str:
         ord(char) < 32 and char not in "\r\n\t" for char in value
     ):
         raise ValueError("invalid reply")
-    return IntentBase(reply=" ".join(value.split())[:500]).reply
+    return humanize_reply(IntentBase(reply=" ".join(value.split())[:500]).reply)
 
 
 class ToolLoop:
@@ -277,17 +280,17 @@ class ToolLoop:
                         if unresolved:
                             result = unresolved[-1]
                             status = result["data"].get("status") if result["success"] else "failed"
-                            reply = {"pending": "操作已启动，尚未完成，请稍后查询状态。", "uncertain": "操作结果尚未确认，请查询游戏状态。", "failed": "工具执行失败，请查询状态后调整请求。"}[status]
+                            reply = {"pending": "我还在弄，没结束呢，等我一下。", "uncertain": "我这边还没法确认，先看看情况。", "failed": "这次没弄成，我看看卡在哪儿。"}[status]
                             if status == "failed":
                                 reply = TOOL_FAILURE_REPLIES.get(result["error"].get("code"), reply)
                         if final and not terminal and len(results) >= self.settings.tool_max_calls:
-                            reply = "本次工具调用已达到上限；已完成的步骤请以游戏状态为准。"
+                            reply = "我一次能做的不多，先到这儿吧，剩下的再说。"
                         if skipped_any:
                             # 同批后续调用没有执行，不能用模型回复暗示它们已完成。
-                            reply = "前序操作未完成，同批后续调用未执行；请查询游戏状态后再继续。"
+                            reply = "前面那步没弄完，后面的我就先没动。"
                         logger.info("[Tools] 回复完成 calls=%d reply_len=%d elapsed_ms=%d",
                                     calls_made, len(reply), int((time.monotonic() - started) * 1000))
-                        final_reply = redact(reply, self.settings.llm_api_key)
+                        final_reply = redact(humanize_reply(reply), self.settings.llm_api_key)
                         memory_reason = "completed"
                         if memory_turn is not None:
                             if step is not None:

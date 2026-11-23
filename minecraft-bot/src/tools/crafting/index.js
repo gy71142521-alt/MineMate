@@ -6,14 +6,14 @@ const { SMELTING, FUEL } = require('./data');
 
 function registerCrafting(registry) {
   require('./furnace')(registry);
-  registry.register({ name: 'craft_item', description: '检查当前版本配方与材料，在指定工作台合成目标物品；count 为期望产物数量，按整批配方取整。',
+  registry.register({ name: 'craft_item', description: '检查当前版本配方与材料并合成目标物品；position 仅表示已有工作台，不需要工作台的配方省略它；本工具不放置产物。',
     parameters: object({ item_name: text, count: number(1, 16, true), position }, ['item_name', 'count']),
     async execute(ctx, a) {
       const { bot } = ctx;
       const type = bot.registry.itemsByName[a.item_name]?.id;
       ensure(Number.isInteger(type), 'UNKNOWN_ITEM', '当前版本没有指定物品。');
       const table = a.position ? require('../common').blockAt(ctx, a.position) : null;
-      ensure(!table || table.name === 'crafting_table', 'WRONG_BLOCK', '指定位置不是工作台。');
+      ensure(!table || table.name === 'crafting_table', 'WRONG_TABLE', 'position 必须是已有工作台；不需要工作台的配方请省略 position。');
       ensure(bot.recipesAll(type, null, table).length > 0, 'NO_RECIPE', '没有当前条件下可用的合成配方。');
       const recipe = bot.recipesFor(type, null, a.count, table)[0];
       ensure(recipe, 'MATERIALS_MISSING', '材料不足，无法完成指定数量的合成。');

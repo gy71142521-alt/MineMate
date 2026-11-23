@@ -18,8 +18,16 @@ function registerMining(registry) {
       ensure(definition, 'UNKNOWN_BLOCK', '当前版本不存在指定方块。');
       const radius = a.radius ?? 5, maximum = a.max_results ?? 8;
       const found = ctx.bot.findBlocks({ matching: definition.id, maxDistance: radius, count: maximum + 1 });
-      const results = found.map((p) => ({ name: a.block_name, position: plainPosition(p), distance: distance(ctx.bot.entity.position, p) }))
-        .filter((entry) => entry.distance <= radius).sort((x, y) => x.distance - y.distance);
+      const results = found.map((p) => {
+        const block = ctx.bot.blockAt(p);
+        return {
+          name: a.block_name,
+          position: plainPosition(p),
+          distance: distance(ctx.bot.entity.position, p),
+          visible: Boolean(block && ctx.bot.canSeeBlock(block)),
+          diggable: Boolean(block && ctx.bot.canDigBlock(block)),
+        };
+      }).filter((entry) => entry.distance <= radius).sort((x, y) => x.distance - y.distance);
       return state('completed', { blocks: results.slice(0, maximum), truncated: results.length > maximum });
     }
   });

@@ -32,7 +32,7 @@ class MessageHandlerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["arguments"], args)
             llm.complete.assert_awaited_once_with("Steve", "跟着我")
             if intent in ("follow", "stop", "goto"):
-                self.assertIn("尚未执行", result["reply"])
+                self.assertIn("我就", result["reply"])
 
     async def test_illegal_coordinates_extra_fields_and_json(self):
         texts = ["not JSON", '```json\n{}\n```', "[]", '{"intent":"stop","intent":"follow","arguments":{},"reply":"hi"}',

@@ -117,7 +117,7 @@
 | 工具 | 参数示例 | 能做什么 | 范围与限制 |
 | --- | --- | --- | --- |
 | `inspect_block` | `{"position":{"x":10,"y":64,"z":8}}` | 读取该坐标实际方块、距离、当前可挖与可见标记 | 只读，但目标须在交互范围内，默认 ≤4.5 格且区块已加载 |
-| `find_block` | `{"block_name":"iron_ore","radius":8,"max_results":8}` | 在有限范围查找当前版本的指定方块 | radius 可选整数 1～16，默认 5；max_results 可选整数 1～16，默认 8；按距离排列已找到的候选 |
+| `find_block` | `{"block_name":"iron_ore","radius":8,"max_results":8}` | 在有限范围查找当前版本的指定方块 | radius 可选整数 1～16，默认 5；max_results 可选整数 1～16，默认 8；按距离排列已找到的候选，并返回 `visible`/`diggable`；最近候选不代表可见或可达，挖掘前仍需 inspect_block/调整站位 |
 | `inspect_mining_sources` | `{"item_name":"raw_iron","max_results":16}` | 从运行时 drops 查询可能的来源方块；可选 block_name 限定来源 | 只读，不扫描世界；max_results 1～16，默认 16。不是实际掉落保证，不考虑附魔/服务端数据包，须验证背包 |
 | `mine_block` | `{"block_name":"oak_log","position":{"x":10,"y":64,"z":8},"tool_name":"diamond_axe"}` | 挖掘一个明确坐标、明确名称的方块；可指定工具 | 可选 max_distance 为 1～4.5，默认 4.5；不自动导航、不自动拾取、不批量挖掘 |
 
@@ -125,7 +125,7 @@
 
 基础挖掘拒绝空气、水、岩浆、基岩，以及名称匹配箱子、木桶、熔炉、潜影盒、刷怪笼和工作台等受保护目标。它不会因为一块矿石在脚下就自动改挖另一块。
 
-`mine_block` 观察目标变成空气后才返回 completed，`pickupVerified:false` 明确表示没有确认掉落物入包。挖铁矿不一定得到同名物品，现代版本可能得到 `raw_iron`；应按当前游戏结果查询和拾取。
+`mine_block` 观察目标变成空气后才返回 completed，`pickupVerified:false` 明确表示没有确认掉落物入包。Minecraft 可能在挖掘后自动把掉落物吸进背包；此时 `collect_item` 会返回 `ITEM_ENTITY_MISSING`，应先 `inspect_inventory` 核对数量，不要重复挖同一位置或反复调用拾取。挖铁矿不一定得到同名物品，现代版本可能得到 `raw_iron`；应按当前游戏结果查询和拾取。需要“采集到背包总数为 N”时，优先使用 `gather_resource` Skill，它会在拾取前检查库存并在最终背包核验。
 
 `canSeeBlock` 检查射线遮挡，不要求当前已经朝向方块；Mineflayer 默认挖掘会转向目标。背对目标与隔墙是两种情况，转头不能消除实体障碍。
 
@@ -195,7 +195,7 @@
 | --- | --- | --- | --- |
 | `inspect_recipe` | `{"item_name":"stone_pickaxe","count":1,"max_results":8}` | 只读查询当前版本配方、工作台需求、整批产量、材料数量与背包缺口 | count 可选整数 1～64、默认 1；max_results 可选整数 1～16、默认 8；不保证附近有工作台 |
 | `inspect_smelting_recipe` | `{"item_name":"raw_iron","count":2}` | 只读查询现有熔炼适配器的原料、产物及燃料需求 | count 可选整数 1～64、默认 1，可查询续接炉内旧原料后的完整队列；不代表支持所有原版/模组熔炼配方 |
-| `craft_item` | `{"item_name":"stone_pickaxe","count":1,"position":{"x":10,"y":64,"z":8}}` | 使用已有材料合成，读背包实际增量验证产物 | count 必填整数 1～16，表示期望产物数；需工作台时提供其真实 position；实际整批产量最多 64 |
+| `craft_item` | `{"item_name":"stone_pickaxe","count":1,"position":{"x":10,"y":64,"z":8}}` | 使用已有材料合成，读背包实际增量验证产物 | count 必填整数 1～16，表示期望产物数；position 只能是**已有工作台**的坐标，不是放置目标；不需要工作台的配方省略position；实际整批产量最多 64 |
 | `smelt_item` | `{"position":{"x":10,"y":64,"z":8},"action":"start","item_name":"raw_iron","fuel_name":"coal","count":2}` | 普通熔炉分阶段 start/status/take | position/action 必填；count 与 fuel_count 上限统一 64；count 默认 1，未指定 fuel_count 时计算需求，超过单槽容量则在投料前拒绝 |
 | `furnace_add_input` | `{"position":{"x":10,"y":64,"z":8},"item_name":"raw_iron","count":3}` | 向空原料槽添加、向同类原料槽补充本次数量 | count 必填 1～64；校验配方/输出类型/真实堆叠容量；不覆盖已有不同物品 |
 | `furnace_add_fuel` | `{"position":{"x":10,"y":64,"z":8},"count":1}` | 添加/补充燃料，省略 fuel_name 时自动选择 | count 可选 1～64、默认 1；空槽优先煤炭；非空槽只补同类，不能混放 |
@@ -203,7 +203,7 @@
 
 ### 10.1 合成的具体边界
 
-合成按当前版本 Mineflayer 配方执行，不另行硬编码石镐、工作台等制作方法。无需工作台的配方可以省略 position；需要工作台却没有提供时不能完成。
+合成按当前版本 Mineflayer 配方执行，不另行硬编码石镐、工作台等制作方法。`position` 表示“去哪个已有工作台合成”，不是“把产物放到哪里”；`inspect_recipe` 的 `requiresTable=false` 时必须省略 position。制作工作台本身是 2×2 配方，不需要工作台；制作后用 `inspect_placement` 和 `place_block` 放下，`craft_item` 不会自动放置。
 
 `count` 是期望产物数量，不是配方执行次数。例如配方一批生成 4 块木板，要求 5 块会执行两批，预期得到 8 块；查询和返回结果中的 operations、expected、actualIncrease 用于核对不同阶段的数量。
 
@@ -300,7 +300,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "& .\scripts\test-furnace
 | 目标 | 现有工具可组成的流程 | 仍需调用方决定或确认 |
 | --- | --- | --- |
 | 挖一个已知坐标方块并收取掉落 | inspect_block → 必要时 find_interaction_positions/goto_position → 重新检查 → mine_block → collect_item → inspect_inventory | 方块被挡住时换哪一站位；预期掉落物名称；背包最终增量 |
-| 制作工作台 | inspect_recipe → 材料已具备时 craft_item → inspect_inventory | 缺木材时不能跳过采集和木板合成；制作不等于放置 |
+| 制作工作台 | inspect_recipe(crafting_table) → craft_item(crafting_table, count=1，省略 position) → inspect_placement → place_block → inspect_inventory | 缺木材时不能跳过采集和木板合成；制作不等于放置，place_block 需要 position/reference_position/face |
 | 使用现有材料做石镐 | inspect_recipe → 确认材料和可触及工作台 → craft_item → inspect_inventory | 木棍、石料不足时先补齐；未提供工作台不能完成相应配方 |
 | 用空熔炉烧两块粗铁并取出 | inspect_smelting_recipe → open_furnace 核对空炉 → smelt_item(start) → 有界 status → take → inspect_inventory | 燃料、背包空间、真实炉子位置；占用时停止，不覆盖 |
 | 攻击附近一只僵尸 | find_entity → 必要时 goto_position → 再确认目标 → attack_entity | 选择哪个 entity_id；移动后实体可能已离开；造成伤害不等于击杀 |
@@ -344,6 +344,8 @@ Python `smelt_item` Skill 当前只启动熔炼：新增原料 1～64，优先�
 | ENTITY_MISSING | 实体失效、已离开、身份变化或超出本次攻击距离 | 重新 find_entity；高度差也影响距离 |
 | BLOCK_CHANGED | 当前方块与请求名称不符 | 重新 inspect_block，不能沿用旧假设 |
 | TOOL_MISSING / WRONG_TOOL / TOOL_DAMAGED | 工具缺失、不适合采集、耐久不足或不可确认 | 选择背包中真实可用的工具 |
+| WRONG_TABLE | `craft_item.position` 不是工作台，或不需工作台的配方却传了 position | 省略 position，或改传真实工作台坐标；放置用 place_block |
+| ITEM_ENTITY_MISSING | 地面上没有指定掉落物实体，可能已被自动拾取 | 先 inspect_inventory 核对背包，不重复挖同一位置；精确数量用 gather_resource |
 | PROTECTED_BLOCK / FORBIDDEN_TARGET | 当前基础工具拒绝该目标 | 查看挖掘/攻击支持列表，Planning 不能绕过工具规则 |
 | OCCUPIED / ENTITY_COLLISION | 放置位置已有方块或可能碰到实体 | 查目标与站位；需要挖掘时使用正确挖掘工具 |
 | INVENTORY_FULL / NO_SPACE | 没有可接收物品的槽位或堆叠空间 | 由玩家整理，或明确调用受支持的存放/丢弃工具 |

@@ -26,7 +26,7 @@ class AgentApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["data"]["intent"], "goto")
-        self.assertIn("尚未执行", body["data"]["reply"])
+        self.assertIn("我就", body["data"]["reply"])
         self.assertIsNone(body["error"])
 
     async def test_invalid_input_and_invalid_model_json(self):

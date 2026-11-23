@@ -10,7 +10,7 @@ module.exports = function registerCollect(registry) {
         (a.entity_id === undefined || entity.id === a.entity_id) && distance(bot.entity.position, entity.position) <= (a.radius ?? 8))
         .sort((x, y) => distance(bot.entity.position, x.position) - distance(bot.entity.position, y.position));
       const entity = candidates[0];
-      ensure(entity, 'ITEM_ENTITY_MISSING', '范围内没有指定的有效掉落物实体。');
+      ensure(entity, 'ITEM_ENTITY_MISSING', '范围内没有指定的掉落物实体；可能已被自动拾取，请查看背包确认。');
       ensure(bot.inventory.emptySlotCount() > 0 || bot.inventory.items().some((item) => item.name === a.item_name && item.count < item.stackSize), 'INVENTORY_FULL', '背包没有可接收物品的空间。');
       const before = count(bot, a.item_name);
       const goal = new GoalNear(entity.position.x, entity.position.y, entity.position.z, 0.5);

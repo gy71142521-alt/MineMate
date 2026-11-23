@@ -88,6 +88,7 @@ test('方块有限查找校验名称、三维半径、返回上限', async () =>
   const result = await f.run('find_block', { block_name: 'stone', radius: 5, max_results: 1 });
   assert.equal(options.count, 2); assert.equal(options.maxDistance, 5);
   assert.equal(result.data.blocks.length, 1); assert.equal(result.data.truncated, true);
+  assert.equal(result.data.blocks[0].visible, true); assert.equal(result.data.blocks[0].diggable, true);
   assert.equal((await f.run('find_block', { block_name: 'fake' })).error.code, 'UNKNOWN_BLOCK');
 });
 test('放置检查支撑面、占用和背包，单方块放置后读取真实结果', async () => {

@@ -8,6 +8,7 @@ from . import diagnostics
 from .config import Settings
 from .intent import MessageRequest, parse_intent, redact
 from .llm_client import LLMClient, LLMError
+from .persona import humanize_reply
 
 
 logger = logging.getLogger("minemate.agent")
@@ -77,13 +78,16 @@ class MessageHandler:
                     raise LLMError(502, "LLM_INVALID_INTENT", "模型意图格式无效，请换种说法再试。") from error
                 # 对动作意图使用确定性的说明，避免模型误称已经执行。
                 replies = {
-                    "follow": "已识别跟随意图，尚未执行；如需现在跟随，请发送“跟随我”。",
-                    "goto": "已识别坐标导航意图，尚未执行；如需现在导航，请发送“前往 X Y Z”。",
-                    "stop": "已识别停止意图，尚未执行；如需立即停止，请发送“停止”。",
-                    "query_status": "已识别状态查询意图。请发送“状态”查询 Bot 自身状态；当前未读取玩家状态。",
-                    "unsupported": "这个操作目前尚不支持，请尝试聊天或已有指令。",
+                    "follow": "好，我跟着你；你说“跟随我”我就动。",
+                    "goto": "好，我记下方向了；你说“前往”加坐标我就过去。",
+                    "stop": "好，我停；你说“停止”我就马上停。",
+                    "query_status": "想看我状态就发“状态”，我告诉你。",
+                    "unsupported": "这个我暂时还不会，换个玩法？",
                 }
-                result["reply"] = redact(replies.get(result["intent"], result["reply"]), config.llm_api_key)
+                result["reply"] = redact(
+                    humanize_reply(replies.get(result["intent"], result["reply"])),
+                    config.llm_api_key,
+                )
                 logger.info("[Agent] 处理完成 intent=%s elapsed_ms=%d",
                             result["intent"], int((time.monotonic() - started) * 1000))
                 return result

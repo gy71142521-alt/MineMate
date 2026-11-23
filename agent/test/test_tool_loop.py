@@ -93,7 +93,7 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
             for name, status in [("set_sprint", "completed"), ("set_sneak", "completed"), ("follow_player", "pending")]
         ]
         result = await loop.run(REQUEST)
-        self.assertIn("尚未完成", result["reply"])
+        self.assertIn("没结束", result["reply"])
         self.assertEqual([item.args[:2] for item in client.execute.await_args_list], [
             ("set_sprint", {"enabled": True}), ("set_sneak", {"enabled": False}), ("follow_player", {})])
         client.cancel.assert_not_awaited()
@@ -156,8 +156,8 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("inspect_placement 仅用于放置", prompt)
 
     async def test_failed_tool_reply_preserves_actionable_reason_without_raw_error(self):
-        for code, expected in [("CANNOT_CONSUME", "饥饿值"),
-                               ("NO_LINE_OF_SIGHT", "遮挡"), ("OCCUPIED", "已有方块"), ("NAVIGATION_FAILED", "导航未完成")]:
+        for code, expected in [("CANNOT_CONSUME", "不饿"),
+                               ("NO_LINE_OF_SIGHT", "挡住"), ("OCCUPIED", "已经有东西"), ("NAVIGATION_FAILED", "没走过去")]:
             loop, _, client = self.fixture([call(), {"content": "已经完成了。"}])
             client.execute.return_value = {"success": False, "tool": "demo", "data": None, "error": {"code": code, "message": "unit-secret"}}
             result = await loop.run(REQUEST)
@@ -172,7 +172,7 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
         loop, llm, client = self.fixture([response, {"content": "操作已启动。"}])
         client.execute.return_value = {"success": True, "tool": "demo", "data": {"status": "pending"}, "error": None}
         result = await loop.run(REQUEST)
-        self.assertIn("尚未完成", result["reply"])
+        self.assertIn("没结束", result["reply"])
         self.assertEqual(client.execute.await_args.args[:3], ("demo", {"x": 1}, "Steve"))
         history = llm.tool_completion.await_args.args[0]
         wire_call = history[-2]["tool_calls"][0]
@@ -236,6 +236,29 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("已全部完成", result["reply"])
             self.assertTrue(llm.tool_completion.await_args.kwargs["final"])
             self.assertEqual(client.execute.await_count, 1)
+
+    async def test_wrong_table_reply_explains_craft_position(self):
+        loop, _, client = self.fixture([call("craft_item", {}), {"content": "已经完成。"}])
+        empty = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+        client.catalog.return_value = ({"craft_item": {"name": "craft_item", "description": "合成",
+                                                        "parameters": empty}}, 7)
+        client.execute.return_value = {"success": False, "tool": "craft_item", "data": None,
+                                       "error": {"code": "WRONG_TABLE", "message": "position 必须是已有工作台。"}}
+        result = await loop.run(REQUEST)
+        self.assertIn("工作台", result["reply"])
+        self.assertIn("另外找地方", result["reply"])
+        self.assertNotIn("已经完成", result["reply"])
+
+    async def test_item_entity_missing_reply_explains_auto_pickup(self):
+        loop, _, client = self.fixture([call("collect_item", {}), {"content": "已经完成。"}])
+        empty = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+        client.catalog.return_value = ({"collect_item": {"name": "collect_item", "description": "拾取",
+                                                          "parameters": empty}}, 7)
+        client.execute.return_value = {"success": False, "tool": "collect_item", "data": None,
+                                       "error": {"code": "ITEM_ENTITY_MISSING", "message": "范围内没有掉落物。"}}
+        result = await loop.run(REQUEST)
+        self.assertIn("捡起来", result["reply"])
+        self.assertNotIn("已经完成", result["reply"])
 
     async def test_call_count_limit_and_duplicate_call_id(self):
         loop, llm, client = self.fixture([call(), call(identity="call2")], tool_max_calls=1)
@@ -315,12 +338,20 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.code, "INVALID_TOOL_CALL")
         client.cancel.assert_awaited_once_with("Steve", client.execute.await_args.args[3])
 
+    async def test_model_coordinates_are_not_leaked_to_player(self):
+        loop, _, client = self.fixture([{"content": "我到了 189, 64, 190，挖到木头了。"}])
+        result = await loop.run(REQUEST)
+        self.assertNotIn("189", result["reply"])
+        self.assertNotIn("64", result["reply"])
+        self.assertNotIn("190", result["reply"])
+        self.assertIn("挖到木头", result["reply"])
+
     async def test_multiline_or_long_display_reply_does_not_cancel_started_action(self):
         for text in ("操作已启动。\r\n尚未完成。", "这是说明文字" * 110):
             loop, _, client = self.fixture([call(), {"content": text}])
             client.execute.return_value = {"success": True, "tool": "demo", "data": {"status": "pending"}, "error": None}
             result = await loop.run(REQUEST)
-            self.assertIn("尚未完成", result["reply"])
+            self.assertIn("没结束", result["reply"])
             client.execute.assert_awaited_once()
             client.cancel.assert_not_awaited()
         loop, _, _ = self.fixture([{"content": "第一行\n第二行\t继续"}])
@@ -396,8 +427,8 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
             {"success": True, "tool": "demo", "data": {"status": "completed"}, "error": None},
         ]
         result = await loop.run(REQUEST)
-        self.assertIn("前序操作未完成", result["reply"])
-        self.assertIn("未执行", result["reply"])
+        self.assertIn("前面那步没弄完", result["reply"])
+        self.assertIn("没动", result["reply"])
         self.assertEqual(client.execute.await_count, 1)
         history = llm.tool_completion.await_args.args[0]
         tool_messages = {item["tool_call_id"]: json.loads(item["content"]) for item in history if item["role"] == "tool"}
