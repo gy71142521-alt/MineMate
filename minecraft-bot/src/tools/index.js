@@ -18,8 +18,8 @@ function createToolSystem(bot, options = {}) {
   };
   registry.register({ name: 'follow_player', description: '持续跟随发出请求的玩家，直到停止或目标丢失。', parameters: object(), movement: true, compatibleControls: true,
     execute: ({ movement, username }) => movementResult(movement.follow(username)) });
-  registry.register({ name: 'goto_position', description: '坐标导航，默认最多等 15 秒；completed 为真实到达后可继续交互，pending 则尚未到达。不会自动攻击或挖掘。wait_seconds=0 可立即返回。',
-    parameters: object({ x: number(-29999984, 29999984), y: number(-2048, 2047), z: number(-29999984, 29999984), wait_seconds: number(0, 15) }, ['x', 'y', 'z']), movement: true, compatibleControls: true,
+  registry.register({ name: 'goto_position', description: '坐标导航，默认最多等 15 秒；completed 表示满足到达半径，交互前仍须复查距离/视线。pending 尚未到达。arrival_range 可选 0～2，默认 2；0 要求进入指定脚部方块，用于交互站位。wait_seconds=0 立即返回。不会自动攻击或挖掘。',
+    parameters: object({ x: number(-29999984, 29999984), y: number(-2048, 2047), z: number(-29999984, 29999984), wait_seconds: number(0, 15), arrival_range: number(0, 2) }, ['x', 'y', 'z']), movement: true, compatibleControls: true,
     execute: navigate });
   require('./movement/tools')(registry);
   require('./movement/queries')(registry);

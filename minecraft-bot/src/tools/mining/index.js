@@ -39,12 +39,24 @@ function registerMining(registry) {
         usable(selected);
         ensure(block.canHarvest(selected.type), 'WRONG_TOOL', '指定工具无法采集该方块，请选择合适的工具。');
         await ctx.step(() => bot.equip(selected, 'hand'));
-      }
-      if (!block.canHarvest(bot.heldItem?.type)) {
-        const tool = items(bot).find((item) => block.canHarvest(item.type) && (!item.maxDurability || item.maxDurability - item.durabilityUsed > 1));
-        ensure(tool, 'TOOL_MISSING', '缺少可采集此方块且耐久足够的工具。');
-        usable(tool);
-        await ctx.step(() => bot.equip(tool, 'hand'));
+      } else {
+        // 自动模式优先选择背包中可用的合适工具；只有没有工具时才尝试空手。
+        // harvestTools 是 Mineflayer/Prismarine 对“必须使用工具”的运行时定义。
+        // 对可空手采集的方块，不能把背包中的普通物品误当成工具。
+        const requiresTool = !block.canHarvest(undefined);
+        const handDigTime = typeof block.digTime === 'function' ? block.digTime(undefined) : Infinity;
+        const tool = items(bot).find((item) => (block.harvestTools?.[item.type] ||
+          (requiresTool && !block.harvestTools && block.canHarvest(item.type)) ||
+          (!requiresTool && !block.harvestTools && typeof block.digTime === 'function' &&
+            block.digTime(item.type) < handDigTime)) &&
+          block.canHarvest(item.type) && (!item.maxDurability || item.maxDurability - item.durabilityUsed > 1));
+        if (tool) {
+          usable(tool);
+          if (bot.heldItem?.type !== tool.type) await ctx.step(() => bot.equip(tool, 'hand'));
+        } else {
+          ensure(block.canHarvest(undefined), 'TOOL_MISSING', '背包中没有合适工具，且空手无法采集该方块。');
+          if (bot.heldItem && typeof bot.unequip === 'function') await ctx.step(() => bot.unequip('hand'));
+        }
       }
       if (bot.heldItem) usable(bot.heldItem);
       block = blockAt(ctx, a.position, a.max_distance ?? 4.5);

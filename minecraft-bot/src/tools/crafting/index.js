@@ -2,14 +2,10 @@ const { object, text, number, position } = require('../schema');
 const { ensure, count, itemByName, state } = require('../common');
 const { interact } = require('../interaction');
 
-// 基础熔炉白名单，其他版本/配方需单独适配，不猜测未知加工规则。
-const SMELTING = Object.freeze({ raw_iron: 'iron_ingot', iron_ore: 'iron_ingot', deepslate_iron_ore: 'iron_ingot',
-  raw_gold: 'gold_ingot', gold_ore: 'gold_ingot', deepslate_gold_ore: 'gold_ingot', raw_copper: 'copper_ingot',
-  copper_ore: 'copper_ingot', sand: 'glass', cobblestone: 'stone', beef: 'cooked_beef', porkchop: 'cooked_porkchop',
-  chicken: 'cooked_chicken', potato: 'baked_potato', oak_log: 'charcoal', birch_log: 'charcoal', spruce_log: 'charcoal' });
-const FUEL = Object.freeze({ coal: 8, charcoal: 8, oak_planks: 1.5, birch_planks: 1.5, spruce_planks: 1.5, stick: 0.5 });
+const { SMELTING, FUEL } = require('./data');
 
 function registerCrafting(registry) {
+  require('./furnace')(registry);
   registry.register({ name: 'craft_item', description: '检查当前版本配方与材料，在指定工作台合成目标物品；count 为期望产物数量，按整批配方取整。',
     parameters: object({ item_name: text, count: number(1, 16, true), position }, ['item_name', 'count']),
     async execute(ctx, a) {
@@ -36,7 +32,7 @@ function registerCrafting(registry) {
     }
   });
   registry.register({ name: 'smelt_item', description: '分阶段操作普通熔炉：start 放入原料燃料并返回 pending；status 查进度；take 取出已确认的整批产物。',
-    parameters: object({ position, action: { type: 'string', enum: ['start', 'status', 'take'] }, item_name: text, fuel_name: text, count: number(1, 8, true), fuel_count: number(1, 16, true) }, ['position', 'action']),
+    parameters: object({ position, action: { type: 'string', enum: ['start', 'status', 'take'] }, item_name: text, fuel_name: text, count: number(1, 64, true), fuel_count: number(1, 64, true) }, ['position', 'action']),
     async execute(ctx, a) {
       const { bot } = ctx;
       let input, fuel;
@@ -46,7 +42,9 @@ function registerCrafting(registry) {
         ensure(bot.registry.itemsByName[SMELTING[a.item_name]], 'UNSUPPORTED_RECIPE', '当前版本没有该熔炼产物。');
         input = itemByName(bot, a.item_name); fuel = itemByName(bot, a.fuel_name);
         const fuelCount = a.fuel_count ?? Math.ceil(amount / FUEL[a.fuel_name]);
+        ensure(fuelCount <= 64, 'FURNACE_FUEL_FULL', '所需燃料超过单槽64件，请使用熔炉子工具分次添加或熔炼 Skill。');
         ensure(count(bot, a.item_name) >= amount && count(bot, a.fuel_name) >= fuelCount && fuelCount * FUEL[a.fuel_name] >= amount, 'MATERIALS_MISSING', '熔炉原料或燃料不足。');
+        ensure(a.item_name !== a.fuel_name || count(bot, a.item_name) >= amount + fuelCount, 'MATERIALS_MISSING', '同种物品作为原料和燃料时，背包总量不足。');
       }
       return interact(ctx, a.position, 'furnace', async (window, adapter) => {
         const before = adapter.inspect(window);

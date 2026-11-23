@@ -480,6 +480,50 @@ test('实际寻路器可绕过三格高障碍，生成的路径不挖掘、不�
   assert.ok(result.path.every((node) => node.toBreak.length === 0 && node.toPlace.length === 0));
 });
 
+test('实际 A*：默认附近到达可能够不到工作台，精确站位到达解决两格误差', (t) => {
+  const { bot, movement } = setup(t, { realPlugin: true });
+  setTerrain(bot, (p) => p.y < 64 ? 'stone' : p.x === 7 && p.z === 0 && p.y === 64 ? 'crafting_table' : 'air');
+  const tableCenter = new Vec3(7.5, 64.5, 0.5);
+  assert.equal(movement.goTo('Steve', 4, 64, 0).ok, true);
+  const nearby = computePath(bot, bot.pathfinder.goal);
+  assert.equal(nearby.status, 'success');
+  const nearEnd = nearby.path.at(-1);
+  const nearEye = new Vec3(nearEnd.x, nearEnd.y + 1.5, nearEnd.z);
+  assert.ok(nearEye.distanceTo(tableCenter) > 4.5, '默认到达只是站位附近，不能当作工作台可交互');
+
+  assert.equal(movement.goTo('Steve', 4, 64, 0, { arrivalRange: 0 }).ok, true);
+  const exact = computePath(bot, bot.pathfinder.goal);
+  assert.equal(exact.status, 'success');
+  const exactEnd = exact.path.at(-1);
+  assert.deepEqual([exactEnd.x, exactEnd.y, exactEnd.z], [4.5, 64, 0.5]);
+  const exactEye = new Vec3(exactEnd.x, exactEnd.y + 1.5, exactEnd.z);
+  assert.ok(exactEye.distanceTo(tableCenter) < 4.5);
+  assert.ok(exact.path.every((node) => node.toBreak.length === 0 && node.toPlace.length === 0));
+  const goal = bot.pathfinder.goal;
+  for (const arrivalRange of [-1, 3, NaN, '0', true]) {
+    assert.equal(movement.goTo('Steve', 5, 64, 0, { arrivalRange }).ok, false);
+    assert.equal(bot.pathfinder.goal, goal, '非法参数不替换已有有效任务');
+  }
+});
+
+test('导航工具传递可选到达半径，默认保持两格且拒绝非法参数', async (t) => {
+  const { bot, movement } = setup(t);
+  const { createToolSystem } = require('../src/tools');
+  const tools = createToolSystem(bot, { movement, logger: { log() {}, error() {} } });
+  tools.guardMovement(); bot.emit('spawn'); t.after(() => tools.dispose());
+  let result = await tools.execute('goto_position', { x: 6, y: 64, z: 0, arrival_range: 0, wait_seconds: 0 }, 'Steve');
+  assert.equal(result.data.status, 'pending');
+  assert.equal(bot.pathfinder.goal.rangeSq, 0);
+  assert.equal(bot.pathfinder.goal.isEnd(new Vec3(4, 64, 0)), false);
+  result = await tools.execute('goto_position', { x: 6, y: 64, z: 0, wait_seconds: 0 }, 'Steve');
+  assert.equal(result.data.status, 'pending');
+  assert.equal(bot.pathfinder.goal.rangeSq, 4);
+  for (const arrival_range of [-1, 3, '0', true]) {
+    result = await tools.execute('goto_position', { x: 6, y: 64, z: 0, arrival_range, wait_seconds: 0 }, 'Steve');
+    assert.equal(result.error.code, 'INVALID_ARGUMENT');
+  }
+});
+
 test('实际寻路器在必须挖墙或搭路的地形报告无路，即使背包里有方块', (t) => {
   const { bot } = setup(t, { realPlugin: true });
   const goal = new GoalNear(5, 64, 0, 1);

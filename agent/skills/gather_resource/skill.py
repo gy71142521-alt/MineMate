@@ -41,7 +41,7 @@ class _Gather:
         self.data = {"stage": "resolving", "query": parameters.resource, "item_name": None,
                      "count_mode": "total", "requested_total": parameters.count, "initial_count": None,
                      "current_count": None, "collected": 0, "remaining": parameters.count,
-                     "origin": None, "dimension": None, "sources": [], "sources_truncated": False,
+                     "origin": None, "search_center": None, "dimension": None, "sources": [], "sources_truncated": False,
                      "scans": 0, "search_radius": parameters.search_radius, "coverage_complete": False,
                      "candidates_truncated": False,
                      "attempt_count": 0, "blocks_mined": 0, "attempts": [], "tool_name": None}
@@ -82,6 +82,9 @@ class _Gather:
 
     async def find(self) -> list[dict]:
         own, _ = player(await self.snapshot())
+        # 采集成功并移动到新位置后，下一轮以当前位置重新划定有限搜索范围；
+        # origin 仅用于记录任务起点，不能把大批量采集锁死在起点附近。
+        self.data["search_center"] = own
         candidates = []
         for source in self.data["sources"]:
             result = await self.call("find_block", {"block_name": source, "radius": self.p.search_radius, "max_results": 16})
@@ -92,7 +95,7 @@ class _Gather:
                 key = tuple(point[a] for a in ("x", "y", "z"))
                 if entry.get("name") != source or key in self.attempted:
                     continue
-                if distance(self.data["origin"], point) <= self.p.search_radius and distance(own, point) <= self.p.search_radius:
+                if distance(self.data["search_center"], point) <= self.p.search_radius and distance(own, point) <= self.p.search_radius:
                     candidates.append({"name": source, "position": point})
         candidates.sort(key=lambda item: distance(own, item["position"]))
         self.progress("searching")
@@ -130,7 +133,7 @@ class _Gather:
         points.sort(key=lambda p: (distance(p, target), distance(p, own)))
         for point in points[:3]:
             goal = {a: math.floor(point[a]) for a in ("x", "y", "z")}
-            if distance(goal, self.data["origin"]) > self.p.search_radius:
+            if distance(goal, self.data["search_center"]) > self.p.search_radius:
                 continue
             try:
                 await self.call("goto_position", {**goal, "wait_seconds": 0})
@@ -173,6 +176,7 @@ class _Gather:
     async def run(self) -> dict:
         world = await self.snapshot()
         self.data["origin"], self.data["dimension"] = player(world)
+        self.data["search_center"] = self.data["origin"]
         self.progress("resolving")
         self.data["item_name"] = await self.resolve(self.p.resource, "item")
         self.data["initial_count"] = inventory_counts(world).get(self.data["item_name"], 0)

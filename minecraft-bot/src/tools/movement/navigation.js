@@ -25,7 +25,9 @@ async function navigate(ctx, args) {
   completed.catch(() => {});
   try {
     ctx.check();
-    started = movement.goTo(username, args.x, args.y, args.z);
+    started = args.arrival_range === undefined
+      ? movement.goTo(username, args.x, args.y, args.z)
+      : movement.goTo(username, args.x, args.y, args.z, { arrivalRange: args.arrival_range });
     ensure(started?.ok, 'MOVEMENT_REJECTED', started?.message ?? '移动被拒绝。');
     taskId = Number.isSafeInteger(started.taskId) ? started.taskId : null;
     if (!canWait || taskId === null) return state('pending', { movement: started });

@@ -115,6 +115,7 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 - 丢弃工具不判断物品价值，不设物品白名单；按用户明确指定的名称和数量执行，允许钻石、附魔装备及背包最后一件物品。保留单次数量限制与结果验证；价值偏好留待后续记忆/学习层处理。
 - 移动统一由 `tools/movement/index.js` 管理任务，`controls.js` 管理跑步/潜行持续模式和单次跳跃，`tools.js` 注册新移动工具；禁止另建方向控制或寻路循环。切换本控制器目标保留模式，停止/失败/超时/死亡/断线清理；正常到达保留模式直到关闭。
 - 跑步只设置 pathfinder 跑步许可，潜行优先并在关闭后恢复原设置。同步模式工具可在导航等待期间执行，不取得或替换导航锁；跳跃及其它异步修改工具仍互斥。跳跃只发一个物理帧脉冲，观察起跳和落地；升级 Mineflayer/pathfinder 时须复查事件顺序及起跳队列清理，并重跑实际物理模拟集成测试与游戏验收。
+- 熔炉子工具放在 `tools/crafting/furnace.js`，配方/燃料唯一支持表在 `crafting/data.js`，由运行时 registry 过滤；不得在 Python 复制燃料/配方清单。添加与补充统一为增量投料/加燃料，非空槽须同类，空燃料槽优先煤炭；不同原料/产品或空间不足时拒绝，不擅自清炉。使用官方 putInput/putFuel/takeOutput，取产品仅取当前整栈，不用 transfer 把剩余产品写回只读输出槽；加工中须预留完整栈容量。核验窗口背包与槽位增减，并考虑真实加工/燃烧；未知结果返回 uncertain，不重发副作用。保留原 smelt_item 接口的空炉/整批合同，炉子选择属于后续 Skill。
 
 ## 10. Planning 前置执行接口
 
@@ -138,6 +139,9 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 - Skill 与显式后台工具序列共用 `TaskManager` 的执行槽、租约、心跳、账本、回执与取消；禁止另建争用 Bot 的独立任务队列。Skill 不得创建脱离执行器生命周期的后台任务，不得绕过 ToolClient 操作 Minecraft。
 - `execute()` 返回的数据不是成功凭证。`verify()` 必须对实际执行前后快照检查所有 `success_criteria`，提供结构化证据；失败或不确定结果不得标为 completed。Skill 内部使用确定性程序，不逐个工具调用 LLM。
 - 同一玩家的 `request_id` 在后台工具任务和 Skill 中共享幂等范围，最多保留 64 个内存记录。停止、死亡、换维度、断线和 Node 重启后，不得续跑失效租约；不提供跨重启自动恢复。
-- 生产 Skill 统一由 `agent/skills/catalog.py` 注册。已实现 A 基础设施、B `explore_and_find` 和 C `gather_resource`，后续按 D 合成、E 熔炼、F LLM 集成与真实游戏验收逐步推进；具体合同、风险与验收见 `docs/tasks/task0065-skills.md`。Mock/回环 HTTP 测试不等同于 Minecraft 验收。
+- 生产 Skill 统一由 `agent/skills/catalog.py` 注册。已实现 A 基础设施、B `explore_and_find`、C `gather_resource`、D `craft_item` 和 E `smelt_item`，后续按 F LLM 集成与真实游戏验收逐步推进；具体合同、风险与验收见 `docs/tasks/task0065-skills.md`。Mock/回环 HTTP 测试不等同于 Minecraft 验收。
 - 搜索使用三维距离、有限已加载范围、有限路点和候选站位；只读搜索不得移动。接近复用原导航，并重新确认同一坐标/实体 ID 和最终距离。不得把“未发现”表述为整个世界没有资源。进度通过 `report_progress()` 写入有界执行记录；失败仍保留搜索范围、路点与真实工具账本。
-- `gather_resource.count` 是背包目标总数，先扣除已有数量。采集来源通过 Node 只读工具 `inspect_mining_sources` 查询运行时 drops，不得在 Python 硬编码掉落表；来源只是可能结果，附魔/数据包仍须以真实背包验证。挖掘与拾取分别核验；脚下支撑/已尝试坐标跳过，无实体只能有界短查，未知结果不得继续挖掘。当前初始搜索半径最多 16 格，不自动合成工具或全局探索。
+- `gather_resource.count` 是背包目标总数（1～256），先扣除已有数量。采集来源通过 Node 只读工具 `inspect_mining_sources` 查询运行时 drops，不得在 Python 硬编码掉落表；来源只是可能结果，附魔/数据包仍须以真实背包验证。挖掘与拾取分别核验；脚下支撑/已尝试坐标跳过，无实体只能有界短查，未知结果不得继续挖掘。当前每轮搜索半径最多 16 格，采集后按 Bot 当前坐标更新范围，不自动合成工具或全局探索。
+- `craft_item.count` 是本次期望新增产物数（1～16），不能扣除已有产物；整批配方报告实际增量。先用 Node `inspect_recipe` 查询真实材料缺口及 `requiresTable`，缺材料不导航/合成，需要工作台才搜索接近并复查。合成工具一次提交，未知结果不重发；最终独立验证实际背包净增量和维度。不在 Python 维护配方表，不自动采集、放工作台或递归调用其它 Skill。
+- 交互站位导航须显式考虑到达容差：`goto_position.arrival_range` 可选 0～2、默认 2；合成 Skill 用 0 进入目标脚部方块，再复查实际距离和视线。不得把 GoalNear 默认两格的“已到达”当成一定可以交互；不能为修复 Skill 改掉原有聊天/HTTP 导航的默认行为。工作台失败保留 workbench_check 诊断，并使用真实 A* 或包含到达误差的模拟测试。
+- 熔炼 Skill `smelt_item` 当前仅投放原料和燃料，复用 inspect_smelting_recipe/open_furnace/furnace_add_input/furnace_add_fuel；禁止调用 furnace_take_output 或旧 smelt_item(start)，不等待产品、不轮询、不自动续补，不实现收集 Skill。每次新增 1～64，逐炉投入 min(剩余量, 64-已有原料)，最多 8 炉、每炉提交一次；煤炭优先、同类槽补充、真实距离/视线和修改前复查保持。use_existing 仅允许同工艺续接，不取已有产品，输出满槽跳过；容量不足保留已投/剩余量并失败。最终独立核验原料/燃料背包变化、炉内原料/产品按 Node 配方折算守恒和同维度；completed 只表示投料完成，completion_scope=furnace_loading、smelting_completed=null。弱燃料一次最多 64，剩余需求及未知燃烧容量明确标记需后续处理，不承诺整批完成，也不建立长期燃料预留。结束即释放控制权，不创建后台监视器；未知结果不重发，取消不回滚。旧 wait_timeout 仅兼容且忽略，总任务超时/调用预算继续生效。

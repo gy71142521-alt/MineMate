@@ -1,6 +1,6 @@
 # MineMate Minecraft LAN Bot
 
-> 当前能力请先看 [34 个游戏工具使用指南](../docs/tools-guide.md)，包含聊天入口、参数、执行结果、熔炉占用等限制，以及与后续 Planning 的边界。
+> 当前能力请先看 [39 个游戏工具使用指南](../docs/tools-guide.md)，包含聊天入口、参数、执行结果、熔炉占用等限制，以及与后续 Planning 的边界。
 
 > Planning 前置衔接已新增后台执行接口和查询工具。资源名称解析由注册目录中的 `resolve_resource` 负责，直接读取运行时 registry；详见 [接口、示例及验收说明](../docs/tasks/task007-preparation.md)。本次不生成 LLM 计划，原 Task 006 消息循环保留原有请求时限；长任务请提交新后台 API。
 
@@ -662,9 +662,14 @@ Task 002 移动与 Task 003 感知实现已迁入统一目录，旧导入路径�
 | 交互 | `interact_block` | `position`；仅门、按钮、拉杆，与功能窗口分开 |
 | 交互 | `transfer_item` | `position,direction,item_name,count`（1–16）；direction 为 deposit/withdraw，验证容器和背包双方数量 |
 | 合成 | `craft_item` | `item_name,count`（1–16）、`position?`（工作台）；按整批配方取整，实际产物上限 64 |
-| 加工 | `smelt_item` | `position,action`（start/status/take）、`item_name?,fuel_name?,count?`（1–8，默认 1）、`fuel_count?`（1–16） |
+| 加工 | `smelt_item` | `position,action`（start/status/take）、`item_name?,fuel_name?,count?`（1–64，默认 1）、`fuel_count?`（1–64）；此处为旧 Node 工具，与 Python 投料 Skill 分属注册表 |
+| 加工 | `furnace_add_input` | `position,item_name,count`（1–64）；添加/补充同类原料，不覆盖其它原料/产品 |
+| 加工 | `furnace_add_fuel` | `position,fuel_name?,count?`（1–64，默认 1）；空槽自动优先煤炭，无煤回退其它已支持燃料；非空槽只同类补充 |
+| 加工 | `furnace_take_output` | `position,item_name,count?`（1–64）；取当前输出整栈，可省略数量；显式 count 须与整栈相同，不支持部分取出 |
 
 `smelt_item` 的 start 还要求白名单原料/燃料、足量背包物品、空熔炉槽；放入后返回 pending。status 可查询进度和输出；take 要求指定实际产物名称与输出槽整批数量，取出后核对背包。开始熔炼不会被报告为产物已完成。
+
+向使用中的炉子追加原料/燃料请使用独立 `furnace_add_input/furnace_add_fuel`；它们的 completed 只表示本次物品转移已核验，不表示熔炼完成。`furnace_take_output` 可在加工中取出当前整栈，也能处理 64 个产品；背包须有足够容量，加工中保守预留一个完整输出栈的空间。不同工艺返回冲突，不自动清炉或选择其它炉子。燃料只接受共享适配器已定义且当前 registry 存在的物品，不声称支持任意模组燃料或所有原版可燃物。命令与边界见 [独立熔炉工具说明](../docs/tools-guide.md#103-添加补充与独立取出)。
 
 默认交互距离为 4.5 格，实体距离包含垂直高度。寻路依然 `canDig=false`，禁止为走路挖掘或搭方块；`mine_block` 是另行明确授权的单方块操作。挖掘检查名称、可见性、工具、耐久和采集条件，拒绝脚下支撑、储物方块及受保护类型。放置检查相邻支撑面、空位置、实体碰撞与背包。
 
@@ -925,6 +930,8 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3000/api/tools/execute' -C
 - `test/`：不依赖真实账号和游戏世界的自动测试。
 
 API 已对照 [Mineflayer 官方说明](https://github.com/PrismarineJS/mineflayer/blob/master/docs/README.md)、[Mineflayer API](https://github.com/PrismarineJS/mineflayer/blob/master/docs/api.md) 和 [node-minecraft-protocol 认证选项](https://github.com/PrismarineJS/node-minecraft-protocol/blob/master/docs/API.md#mccreateclientoptions) 检查，使用 `createBot`、`spawn`、`chat`、`error`、`kicked`、`end`、`bot.chat()`、`bot.health`、`bot.food`、`bot.entity.position`。
+
+熔炼工具的原料、燃料单次数量上限统一为 64，旧 `smelt_item(start/status/take)` 保持空炉/整批接口，子工具仍校验实际槽容量。Python `smelt_item` Skill 当前只找炉、按容量投放原料/燃料并核验转移，结束后立即释放控制权；不等待加工、不收取产品、不自动续补，尚未实现收集 Skill。见 [熔炼技能说明](../agent/skills/smelt_item/SKILL.md)。
 
 感知 API 已对照本地安装的 Mineflayer 4.39.0 官方 `docs/api.md` 及插件源码检查：`bot.experience.level`、`bot.game.dimension`、`bot.isAlive`、`bot.inventory.slots`、`bot.entity.equipment`、`bot.entities`、`bot.findBlocks()`、`bot.blockAt()`，以及出生/死亡/重生、方块和区块更新事件；未使用自定义协议包。
 

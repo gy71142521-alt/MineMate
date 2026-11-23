@@ -532,6 +532,16 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("mine_block", catalog)
         self.assertIn("query_status", catalog)
         self.assertIn("smelt_item", catalog)
+        for name in ("furnace_add_input", "furnace_add_fuel", "furnace_take_output"):
+            self.assertIn(name, catalog)
+            schema = catalog[name]["parameters"]
+            self.assertEqual(schema["properties"]["count"], {"type": "integer", "minimum": 1, "maximum": 64})
+            args = {"position": {"x": 1, "y": 64, "z": 0}, "count": 64}
+            if name != "furnace_add_fuel":
+                args["item_name"] = "raw_iron" if name == "furnace_add_input" else "iron_ingot"
+            self.assertTrue(validate(schema, args))
+            self.assertFalse(validate(schema, {**args, "count": 65}))
+            self.assertFalse(validate(schema, {**args, "count": True}))
         self.assertIn("jump", catalog)
         for name in ["set_sprint", "set_sneak"]:
             schema = catalog[name]["parameters"]
@@ -551,6 +561,38 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
                 await client.catalog()
             self.assertEqual(error.exception.code, code)
             self.assertNotIn("unit-secret", str(error.exception))
+
+    @unittest.skipUnless(shutil.which("node"), "需要真实 Node 工具目录")
+    async def test_furnace_subtools_use_node_schemas_and_return_real_result_to_model(self):
+        program = "const {EventEmitter}=require('node:events');const {createToolSystem}=require('./src/tools');const r=createToolSystem(new EventEmitter());process.stdout.write(JSON.stringify(r.list()));r.dispose();"
+        output = subprocess.run(["node", "-e", program], cwd=Path(__file__).resolve().parents[2] / "minecraft-bot", capture_output=True, check=True, timeout=10)
+        catalog = {d["name"]: d for d in json.loads(output.stdout) if d["name"].startswith("furnace_")}
+        at = {"x": 1, "y": 64, "z": 0}
+        actions = [("furnace_add_input", {"position": at, "item_name": "raw_iron", "count": 3}),
+                   ("furnace_add_fuel", {"position": at}),
+                   ("furnace_take_output", {"position": at, "item_name": "iron_ingot"})]
+        loop, llm, client = self.fixture([*[call(n, args, identity=f"furnace{i}") for i, (n, args) in enumerate(actions)],
+                                          {"content": "已完成投料、添加燃料和取出现有产品。"}])
+        client.catalog.return_value = (catalog, 7)
+        client.execute.side_effect = [{"success": True, "tool": n, "data": {"status": "completed", "verified": True}, "error": None}
+                                      for n, _ in actions]
+        result = await loop.run(REQUEST)
+        self.assertEqual([a.args[:2] for a in client.execute.await_args_list], actions)
+        self.assertIn("现有产品", result["reply"])
+        history = llm.tool_completion.await_args.args[0]
+        self.assertEqual([json.loads(m["content"])["tool"] for m in history if m["role"] == "tool"], [n for n, _ in actions])
+        prompt = history[0]["content"]
+        self.assertIn("不要为补充操作重复调用", prompt)
+
+    async def test_furnace_conflict_is_reported_without_retry_or_success_claim(self):
+        loop, _, client = self.fixture([call(), {"content": "已经完成了。"}])
+        client.execute.return_value = {"success": False, "tool": "demo", "data": None,
+                                       "error": {"code": "FURNACE_OUTPUT_CONFLICT", "message": "unit-secret"}}
+        result = await loop.run(REQUEST)
+        self.assertIn("其它工艺", result["reply"])
+        self.assertNotIn("已经完成", result["reply"])
+        self.assertNotIn("unit-secret", result["reply"])
+        client.execute.assert_awaited_once()
 
     async def test_http_disconnect_cancels_running_handler(self):
         from unittest.mock import patch

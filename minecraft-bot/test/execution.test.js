@@ -155,3 +155,19 @@ test('熔炼配方查询与原执行器共用原料燃料定义，查询不会�
   assert.equal(data.fuels.find((item) => item.name === 'coal').count, 1);
   assert.equal((await run('inspect_smelting_recipe', { item_name: 'diamond' })).error.code, 'UNSUPPORTED_RECIPE');
 });
+
+test('熔炼配方与旧执行接口的原料上限统一为64，弱燃料总需求可超过单槽容量', async (t) => {
+  const { bot, run } = querySetup(t);
+  const before = JSON.stringify(bot.inventory.items());
+  bot.openFurnace = () => { throw new Error('read must not open window'); };
+  const nine = await run('inspect_smelting_recipe', { item_name: 'raw_iron', count: 9 });
+  assert.equal(nine.success, true);
+  assert.equal(nine.data.fuels.find((item) => item.name === 'coal').count, 2);
+  const full = await run('inspect_smelting_recipe', { item_name: 'raw_iron', count: 64 });
+  assert.deepEqual(full.data.output, { name: 'iron_ingot', count: 64 });
+  assert.equal(full.data.fuels.find((item) => item.name === 'coal').count, 8);
+  assert.equal(full.data.fuels.find((item) => item.name === 'bamboo').count, 256);
+  assert.equal((await run('inspect_smelting_recipe', { item_name: 'raw_iron', count: 65 })).success, false);
+  assert.equal((await run('smelt_item', { position: { x: 1, y: 64, z: 1 }, action: 'start', item_name: 'raw_iron', count: 65 })).success, false);
+  assert.equal(JSON.stringify(bot.inventory.items()), before);
+});

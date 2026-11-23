@@ -210,11 +210,15 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
     return start(username, 'follow', new GoalFollow(entity, LIMITS.followRange), { entity }, `正在跟随 ${username}，保持约 3 格距离。`);
   }
 
-  function goTo(username, x, y, z) {
+  function goTo(username, x, y, z, navigation = {}) {
     const denied = checkAccess(username);
     if (denied) return denied;
     if (![x, y, z].every(Number.isFinite)) {
       return result(false, 'invalid', '坐标必须是三个有效数字，例如：前往 100 65 200。', username);
+    }
+    const arrivalRange = navigation?.arrivalRange ?? LIMITS.nearRange;
+    if (!Number.isFinite(arrivalRange) || arrivalRange < 0 || arrivalRange > LIMITS.nearRange) {
+      return result(false, 'invalid', '到达半径须为 0～2 格；0 表示进入指定脚部方块。', username);
     }
     const target = { x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) };
     const minY = bot.game?.minY;
@@ -230,7 +234,7 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
     if (distance(bot.entity.position, target) > options.maxDistance) {
       return result(false, 'out_of_range', `目标超出本次导航范围（${options.maxDistance} 格），请缩短距离或调整 PATHFINDER_MAX_DISTANCE。`, username);
     }
-    return start(username, 'goto', new GoalNear(target.x, target.y, target.z, LIMITS.nearRange), { target }, `正在前往 ${target.x} ${target.y} ${target.z} 附近。`);
+    return start(username, 'goto', new GoalNear(target.x, target.y, target.z, arrivalRange), { target }, `正在前往 ${target.x} ${target.y} ${target.z} 附近。`);
   }
 
   function stop(username) {

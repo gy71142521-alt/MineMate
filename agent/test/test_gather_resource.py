@@ -140,12 +140,13 @@ class GatherTests(unittest.IsolatedAsyncioTestCase):
         return [name for name, _ in self.node.calls]
 
     async def test_registry_and_strict_parameters(self):
-        self.assertEqual([s["name"] for s in self.registry.list()], ["explore_and_find", "gather_resource"])
-        for args in ({"count": 0}, {"count": 65}, {"count": True}, {"count": "2"}, {"search_radius": 17},
+        self.assertEqual([s["name"] for s in self.registry.list()], ["explore_and_find", "gather_resource", "craft_item", "smelt_item"])
+        for args in ({"count": 0}, {"count": 257}, {"count": True}, {"count": "2"}, {"search_radius": 17},
                      {"max_blocks": 65}, {"resource": "\n"}, {"block_name": ""}, {"shell": "run"}):
             with self.subTest(args=args), self.assertRaises(LLMError):
                 await self.manager.submit(self.request(args))
         self.assertEqual(self.node.calls, [])
+        self.assertEqual(GatherParameters(resource="oak_log", count=256).count, 256)
 
     async def test_gather_mines_picks_up_and_uses_total_inventory_count(self):
         self.node.inventory["oak_log"] = 2
@@ -196,6 +197,17 @@ class GatherTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("find_interaction_positions", self.names())
         self.assertIn("get_movement_task", self.names())
         self.assertEqual(self.names().count("goto_position"), 1)
+
+    async def test_search_center_moves_after_confirmed_collection(self):
+        self.node.blocks = [
+            {"name": "oak_log", "position": {"x": 10, "y": 64, "z": 0}},
+            {"name": "oak_log", "position": {"x": 20, "y": 64, "z": 0}},
+        ]
+        result = await self.finish({"count": 2})
+        self.assertTrue(result["success"], result)
+        mined = [a["position"] for n, a in self.node.calls if n == "mine_block"]
+        self.assertEqual(mined, [{"x": 10, "y": 64, "z": 0}, {"x": 20, "y": 64, "z": 0}])
+        self.assertNotEqual(result["data"]["origin"], result["data"]["search_center"])
 
     async def test_source_mismatch_ambiguity_unknown_data_stop_before_mining(self):
         for i, (flag, code) in enumerate((("source_mismatch", "MINING_SOURCE_MISMATCH"), ("ambiguous", "RESOURCE_AMBIGUOUS"))):
@@ -376,10 +388,12 @@ server.listen(0,'127.0.0.1',()=>console.log(server.address().port));
         executor = None
         try:
             port = int(await asyncio.wait_for(process.stdout.readline(), 5))
-            executor = TaskManager(ToolClient(Settings(f"http://127.0.0.1:{port}", 2, "127.0.0.1", 8000)))
+            # 本地 HTTP 集成验证终态而非真实时间；短轮询避免默认 2 秒空等，
+            # 外层留足 Windows HTTP/SSL 初始化耗时，产品超时另有专项断言。
+            executor = TaskManager(ToolClient(Settings(f"http://127.0.0.1:{port}", 2, "127.0.0.1", 8000)), poll_interval=0.001)
             manager = SkillManager(create_skill_registry(), executor)
             record = await manager.submit(self.request())
-            await asyncio.wait_for(executor._work[record["execution_id"]], 12)
+            await asyncio.wait_for(executor._work[record["execution_id"]], 30)
             result = manager.view(record["execution_id"], "Steve")
             self.assertTrue(result["success"], result)
             self.assertEqual(result["data"]["current_count"], 2)

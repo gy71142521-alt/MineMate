@@ -3,7 +3,7 @@ param(
     [ValidatePattern('^[A-Za-z0-9_]{3,16}$')]
     [string]$Player,
     [string]$Resource = 'oak_log',
-    [ValidateRange(1, 64)]
+    [ValidateRange(1, 256)]
     [int]$Count = 4,
     [string]$BlockName,
     [string]$ToolName,

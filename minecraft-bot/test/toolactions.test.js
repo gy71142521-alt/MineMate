@@ -12,6 +12,7 @@ function fixture({ movement: suppliedMovement } = {}) {
   bot.registry = { blocksByName: { stone: { id: 1 }, dirt: { id: 2 } }, itemsByName: {} };
   bot.blockAt = (p) => blocks.get(p.toString()) ?? { name: 'air', position: p.clone(), boundingBox: 'empty', hardness: 0, canHarvest: () => true };
   bot.equip = async (item) => { bot.heldItem = item; };
+  bot.unequip = async () => { bot.heldItem = null; };
   bot.canDigBlock = () => true; bot.canSeeBlock = () => true; bot.stopDigging = () => {};
   bot.clearControlStates = () => {};
   bot.dig = async (block) => blocks.delete(block.position.toString());
@@ -68,6 +69,18 @@ test('单点方块查询只读；指定钻石斧挖掘时验证并装备实际�
   f.setBlock('stone', block.position, { canHarvest: () => false });
   assert.equal((await f.run('mine_block', { block_name: 'stone', position, tool_name: 'diamond_axe' })).error.code, 'WRONG_TOOL');
   assert.equal(f.blocks.get(block.position.toString()).name, 'stone');
+});
+test('自动挖掘优先使用合适工具；没有工具且空手不可采集时明确拒绝', async () => {
+  const f = fixture(), position = { x: 1, y: 64, z: 0 };
+  f.setBlock('oak_log', undefined, { canHarvest: () => true, digTime: (type) => type === 5 ? 1 : 10 });
+  const axe = f.addItem('iron_axe', 1, { type: 5, maxDurability: 250, durabilityUsed: 0 });
+  assert.equal((await f.run('mine_block', { block_name: 'oak_log', position })).data.status, 'completed');
+  assert.equal(f.bot.heldItem, axe);
+
+  const g = fixture();
+  g.setBlock('stone', undefined, { canHarvest: (type) => type === 5 });
+  assert.equal((await g.run('mine_block', { block_name: 'stone', position })).error.code, 'TOOL_MISSING');
+  assert.match((await g.run('mine_block', { block_name: 'stone', position })).error.message, /空手无法采集/);
 });
 test('方块有限查找校验名称、三维半径、返回上限', async () => {
   const f = fixture(); let options;
@@ -296,6 +309,30 @@ test('熔炉原料/燃料不足不启动，投入返回 pending，未完成不�
   assert.equal((await f.run('smelt_item', { position, action: 'take', item_name: 'iron_ingot', count: 2 })).data.taken, 2);
   assert.equal(f.bot.currentWindow, null);
 });
+test('旧熔炼接口支持64件投料、燃料和取出；超过槽容量在写入前拒绝', async () => {
+  const f = fixture(), position = { x: 1, y: 64, z: 0 };
+  const raw = f.addItem('raw_iron', 64), coal = f.addItem('coal', 64), product = f.addItem('iron_ingot', 0);
+  const slots = [null, null, null], writes = [];
+  const win = { fuel: 0, progress: 0, inputItem: () => slots[0], fuelItem: () => slots[1], outputItem: () => slots[2],
+    putInput: async (_, __, n) => { writes.push(['input', n]); raw.count -= n; slots[0] = { name: 'raw_iron', count: n }; },
+    putFuel: async (_, __, n) => { writes.push(['fuel', n]); coal.count -= n; slots[1] = { name: 'coal', count: n }; },
+    takeOutput: async () => { product.count += slots[2].count; slots[2] = null; }
+  };
+  windowFixture(f, 'furnace', win);
+  assert.equal((await f.run('smelt_item', { position, action: 'start', item_name: 'raw_iron', fuel_name: 'coal', count: 65 })).success, false);
+  assert.equal((await f.run('smelt_item', { position, action: 'start', item_name: 'raw_iron', fuel_name: 'coal', count: 64, fuel_count: 65 })).success, false);
+  f.addItem('bamboo', 256);
+  assert.equal((await f.run('smelt_item', { position, action: 'start', item_name: 'raw_iron', fuel_name: 'bamboo', count: 64 })).error.code, 'FURNACE_FUEL_FULL');
+  assert.deepEqual(writes, []);
+  const start = await f.run('smelt_item', { position, action: 'start', item_name: 'raw_iron', fuel_name: 'coal', count: 64, fuel_count: 64 });
+  assert.equal(start.data.status, 'pending');
+  assert.deepEqual(writes, [['input', 64], ['fuel', 64]]);
+  slots[0] = null; slots[2] = { name: 'iron_ingot', count: 64 };
+  assert.equal((await f.run('smelt_item', { position, action: 'status', item_name: 'iron_ingot', count: 64 })).data.outputReady, true);
+  assert.equal((await f.run('smelt_item', { position, action: 'take', item_name: 'iron_ingot', count: 64 })).data.taken, 64);
+  assert.equal(raw.count, 0); assert.equal(product.count, 64);
+});
+
 test('箱子存取验证双方增减，数量不足不执行，异常关闭窗口', async () => {
   const f = fixture(), position = { x: 1, y: 64, z: 0 }, dirt = f.addItem('dirt', 8);
   const slots = [null, null]; f.bot.inventory.slots = [dirt, null];

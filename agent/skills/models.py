@@ -11,8 +11,23 @@ class SkillParameters(StrictModel):
 
 
 class SkillRequest(ExecutionRequest):
+    timeout_seconds: float = Field(default=300, gt=0, le=1800)
     skill: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def smelting_budget(cls, value):
+        # 保留熔炼 Skill 的历史多炉操作预算；投料完成就返回，不用它等待加工。
+        if isinstance(value, dict) and value.get("skill") == "smelt_item":
+            value = {"timeout_seconds": 1200, "max_tool_calls": 192, **value}
+        return value
+
+    @model_validator(mode="after")
+    def other_skills_keep_timeout_limit(self):
+        if self.skill != "smelt_item" and self.timeout_seconds > 600:
+            raise ValueError("skill timeout exceeds 600 seconds")
+        return self
 
 
 class SkillCheck(StrictModel):

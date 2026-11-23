@@ -1,10 +1,11 @@
 const { object, text, number } = require('../schema');
 const { ensure, items, state } = require('../common');
-const { SMELTING, FUEL } = require('./index');
+const { SMELTING, FUEL } = require('./data');
 
 module.exports = function registerRecipes(registry) {
   registry.register({ name: 'inspect_smelting_recipe', description: '只读查询现有普通熔炉适配器支持的原料、产物、燃料用量与背包缺口，不投入物品。仅表示已实现的基础熔炼能力。', mutates: false,
-    parameters: object({ item_name: text, count: number(1, 8, true) }, ['item_name']),
+    // 只读查询可覆盖炉内旧原料与新增原料的完整队列，单槽最多64。
+    parameters: object({ item_name: text, count: number(1, 64, true) }, ['item_name']),
     execute({ bot }, a) {
       const output = SMELTING[a.item_name], amount = a.count ?? 1, inventory = items(bot);
       ensure(output && bot.registry.itemsByName[a.item_name] && bot.registry.itemsByName[output], 'UNSUPPORTED_RECIPE', '当前版本或适配器不支持该熔炼配方。');

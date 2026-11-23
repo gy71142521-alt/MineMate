@@ -104,7 +104,7 @@ class ExploreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_production_catalog_and_strict_parameters(self):
         # 生产目录新增采集 Skill，原搜索 Skill 及其参数合同保持不变。
-        self.assertEqual([s["name"] for s in self.registry.list()], ["explore_and_find", "gather_resource"])
+        self.assertEqual([s["name"] for s in self.registry.list()], ["explore_and_find", "gather_resource", "craft_item", "smelt_item"])
         self.assertEqual(main.skill_registry.list(), self.registry.list())
         for args in ({"search_radius": 65}, {"search_radius": "16"}, {"max_waypoints": 9},
                      {"max_results": 9}, {"approach": 1}, {"target_kind": "item"}, {"target": "\n"},
@@ -307,10 +307,11 @@ server.listen(0,'127.0.0.1',()=>console.log(server.address().port));
         executor = None
         try:
             port = int(await asyncio.wait_for(process.stdout.readline(), 5))
-            executor = TaskManager(ToolClient(Settings(f"http://127.0.0.1:{port}", 1, "127.0.0.1", 8000)))
+            # 测试专用短轮询；实际超时/取消由专项测试验证，不依赖本机 HTTP 速度。
+            executor = TaskManager(ToolClient(Settings(f"http://127.0.0.1:{port}", 1, "127.0.0.1", 8000)), poll_interval=0.001)
             manager = SkillManager(create_skill_registry(), executor)
             record = await manager.submit(self.request({"approach": True}))
-            await asyncio.wait_for(executor._work[record["execution_id"]], 5)
+            await asyncio.wait_for(executor._work[record["execution_id"]], 30)
             result = manager.view(record["execution_id"], "Steve")
             self.assertTrue(result["success"], result)
             self.assertTrue(result["verification"]["verified"])

@@ -1,6 +1,6 @@
 # MineMate 现有游戏工具使用指南
 
-本文依据当前 `minecraft-bot/src/tools/` 注册表、各工具实现及 Python 执行器整理，覆盖 **36 个实际注册工具**。适合查看当前能做什么、如何调用、为什么失败，以及哪些复杂行为还没有实现。
+本文依据当前 `minecraft-bot/src/tools/` 注册表、各工具实现及 Python 执行器整理，覆盖 **39 个实际注册工具**。适合查看当前能做什么、如何调用、为什么失败，以及哪些复杂行为还没有实现。
 
 文中范围和数量是代码默认值或硬限制，不代表 Minecraft 本身的限制。示例坐标、玩家昵称和实体 ID 仅展示格式，使用前应替换为当前世界的真实信息。源码更新后，以 `GET /api/tools` 返回的实际 Schema 为准。
 
@@ -92,7 +92,7 @@
 | 工具 | 参数示例 | 能做什么 | 范围与限制 |
 | --- | --- | --- | --- |
 | `follow_player` | `{}` | 持续跟随调用玩家，动态更新目标 | 保持约 3 格；只跟随调用者，不接收任意玩家名；玩家实体须已加载且同维度 |
-| `goto_position` | `{"x":10,"y":64,"z":8,"wait_seconds":0}` | 导航到指定坐标附近，返回移动 taskId | GoalNear 半径 2；`wait_seconds` 可选，默认 15、范围 0～15 秒；等待结束可返回 pending |
+| `goto_position` | `{"x":10,"y":64,"z":8,"wait_seconds":0}` | 导航到指定坐标附近，返回移动 taskId | `arrival_range` 可选 0～2，默认 2；0 要求进入指定脚部方块，适用于交互站位。`wait_seconds` 默认 15、范围 0～15 秒；等待结束可返回 pending，到达后仍须检查实际交互条件 |
 | `get_movement_task` | `{"task_id":1}` | 查询原移动任务的运行/到达/失败/取消记录 | 不启动新目标；最多保留 128 条记录；arrived 才映射为 completed |
 | `stop_movement` | `{}` | 最高优先级取消当前工具，停止移动，释放跑步/潜行/跳跃状态 | 不恢复已消耗材料、不撤回熔炉投料 |
 | `set_sprint` | `{"enabled":true}` | 开启或关闭寻路跑步许可 | 不会自行向前走；寻路器只在其判断合适的路段跑步 |
@@ -189,14 +189,17 @@
 
 `interact_block` 观察不到属性变化时返回 uncertain，而不是宣称门已打开。容器存取需要来源数量足够、目标存在可接收槽位；不自动整理背包、分拆 64 个的请求或跨多个容器寻找物品。
 
-## 10. 配方、合成与熔炼：4 个
+## 10. 配方、合成与熔炼：7 个
 
 | 工具 | 参数示例 | 能做什么 | 范围与限制 |
 | --- | --- | --- | --- |
 | `inspect_recipe` | `{"item_name":"stone_pickaxe","count":1,"max_results":8}` | 只读查询当前版本配方、工作台需求、整批产量、材料数量与背包缺口 | count 可选整数 1～64、默认 1；max_results 可选整数 1～16、默认 8；不保证附近有工作台 |
-| `inspect_smelting_recipe` | `{"item_name":"raw_iron","count":2}` | 只读查询现有熔炼适配器的原料、产物及燃料需求 | count 可选整数 1～8、默认 1；不代表支持所有原版/模组熔炼配方 |
+| `inspect_smelting_recipe` | `{"item_name":"raw_iron","count":2}` | 只读查询现有熔炼适配器的原料、产物及燃料需求 | count 可选整数 1～64、默认 1，可查询续接炉内旧原料后的完整队列；不代表支持所有原版/模组熔炼配方 |
 | `craft_item` | `{"item_name":"stone_pickaxe","count":1,"position":{"x":10,"y":64,"z":8}}` | 使用已有材料合成，读背包实际增量验证产物 | count 必填整数 1～16，表示期望产物数；需工作台时提供其真实 position；实际整批产量最多 64 |
-| `smelt_item` | `{"position":{"x":10,"y":64,"z":8},"action":"start","item_name":"raw_iron","fuel_name":"coal","count":2}` | 普通熔炉分阶段 start/status/take | position/action 必填；count 可选整数 1～8、默认 1；fuel_count 可选整数 1～16 |
+| `smelt_item` | `{"position":{"x":10,"y":64,"z":8},"action":"start","item_name":"raw_iron","fuel_name":"coal","count":2}` | 普通熔炉分阶段 start/status/take | position/action 必填；count 与 fuel_count 上限统一 64；count 默认 1，未指定 fuel_count 时计算需求，超过单槽容量则在投料前拒绝 |
+| `furnace_add_input` | `{"position":{"x":10,"y":64,"z":8},"item_name":"raw_iron","count":3}` | 向空原料槽添加、向同类原料槽补充本次数量 | count 必填 1～64；校验配方/输出类型/真实堆叠容量；不覆盖已有不同物品 |
+| `furnace_add_fuel` | `{"position":{"x":10,"y":64,"z":8},"count":1}` | 添加/补充燃料，省略 fuel_name 时自动选择 | count 可选 1～64、默认 1；空槽优先煤炭；非空槽只补同类，不能混放 |
+| `furnace_take_output` | `{"position":{"x":10,"y":64,"z":8},"item_name":"iron_ingot"}` | 独立取出当前输出整栈，包含满栈 64 个 | count 可选 1～64，显式给出须等于当前整栈；加工中也可取，不支持部分取出 |
 
 ### 10.1 合成的具体边界
 
@@ -237,17 +240,58 @@ status/take 的调用格式示例：
 | potato | baked_potato |
 | oak_log、birch_log、spruce_log | charcoal |
 
-当前燃料定义：coal/charcoal 每个支持 8 个原料，oak_planks/birch_planks/spruce_planks 每个按 1.5 个原料计算，stick 每个按 0.5 个计算。未指定 fuel_count 时按本批 count 向上取整所需燃料数；这是当前工具的有限支持列表。
+共享燃料表位于 `tools/crafting/data.js`：coal/charcoal 每个支持 8 个原料，coal_block 为 80、dried_kelp_block 为 20、blaze_rod 为 12、stick 为 0.5、bamboo 为 0.25；橡木、云杉、白桦、丛林、金合欢、深色橡木、红树、樱花、苍白橡木的 planks/log/wood 及去皮 log/wood 按 1.5 计算，仅使用当前 registry 存在的名称。未指定旧 start 的 fuel_count 时按本批 count 向上取整。该表是明确支持的原版燃料规则，不能据此声称识别所有可燃物、模组燃料或数据包修改。
 
-**熔炉使用中会怎样：**
+**旧 smelt_item 接口在熔炉使用中会怎样：**
 
 - 输入、燃料或输出槽只要有任何物品，start 返回 FURNACE_BUSY，即使已有物品也是铁矿或剩余煤炭。
-- 不会追加原料、单独补燃料、取回输入或燃料，也不会选择另一座空炉。
+- 旧 start 不会追加原料或单独补燃料，这两项改用下节的新子工具；取回输入/燃料和自动选择其它炉子仍未实现。
 - status 的“至少够数量”与 take 的“恰好等于数量”不同。例如期望 2 个但输出 3 个，status 可显示就绪，take 仍拒绝。
-- 输出 64 个时不会自动清空；take 的 count 最大为 8，不能用当前接口一次取出 64 个，也不能对 64 个的输出栈按 8 个分取。
+- 旧 start/status/take 的 count 与 fuel_count 上限均为 64，take 仍要求产物整批数量准确匹配；新 furnace_take_output 可省略 count 取当前整栈，支持加工中取出。两者都不支持分取。
 - 取出前无需重复 start。原料投入后的等待不等于已熔炼完成，更不等于铁锭已入背包。
 
-之前讨论的“查看炉况、添加原料、添加燃料、按数量取出”等独立管理工具目前尚未实现；open_furnace 仅提供炉况快照，transfer_item 也不能代替熔炉槽位管理。
+### 10.3 添加/补充与独立取出
+
+“添加”和“补充”都是向指定槽位追加本次数量，因此共用三个工具覆盖五种操作。每次自行打开/关闭窗口，复用原互斥、租约、超时、取消和回执；不需要先 open_furnace 保持窗口。
+
+- **原料**：空槽可添加，同类且数据兼容时可补充。已有不同原料或不同产品分别返回 FURNACE_INPUT_CONFLICT / FURNACE_OUTPUT_CONFLICT，不替换工艺。输出槽已满返回 FURNACE_OUTPUT_FULL，应先明确取出产品；没有自动取走他人物品。
+- **燃料**：空槽自动选煤炭；背包没有煤炭时按共享支持表尝试木炭、煤炭块等已支持燃料，也可用 fuel_name 指定。非空燃料槽只能同类补充，即使背包有煤也不覆盖已有其它燃料。count 是本次燃料件数，不是期望加工件数；所选燃料不足会失败，不静默减少数量或混合多种燃料。
+- **产品**：使用官方 takeOutput 取当前输出整栈，无需等待炉内全部原料加工完。可省略 count 自动取当前栈；显式 count 与整栈不符时返回 OUTPUT_COUNT_MISMATCH，避免误以为只取了部分。输出 64 时可整栈取出，再补充原料；不会自动循环取出/补料。
+- **容量**：按当前窗口背包和实际 stackSize 检查，不假定所有物品都能堆叠 64 个。加工中取出须预留一个完整产品栈的容量，防止操作期间新增产物溢出；容量不足不自动丢弃物品。
+- **核验**：读取窗口内实时背包；原料已经加工为产品时检查数量守恒，燃料即时消耗一件时观察燃烧秒数增长。属性/槽位更新最多有限等待，不能确认时返回 uncertain，不重复投料/加燃料。completed 只表示当前转移已确认，不代表熔炼目标全部完成。
+- **范围**：当前仅普通 furnace，原料仍受共享配方适配器约束。不支持任意模组燃料、高炉/烟熏炉、取回输入/燃料或输出任意数量分取。冲突时寻找其它炉子留给后续 Skill。
+
+### 10.4 独立工具测试命令
+
+先重启 Node/Python，确认 Bot 已进入测试世界并站在熔炉 4.5 格内，准备至少 6 个粗铁和 2 个煤炭。在项目根目录分别执行，Steve 和 10,64,8 换成实际玩家名、熔炉坐标：
+
+```powershell
+Set-Location 'D:\桌面\MineMate'
+```
+
+添加 3 个粗铁：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& .\scripts\test-furnace-tool.ps1 -Player Steve -Action add_input -Position 16,72,-324 -ItemName raw_iron -Count 3"
+```
+
+添加燃料，默认自动选煤炭：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& .\scripts\test-furnace-tool.ps1 -Player Steve -Action add_fuel -Position 16,72,-324 -Count 1"
+```
+
+使用中继续补充 3 个粗铁，使用相同的 add_input 命令；补燃料也重复 add_fuel，表示新的明确追加操作，不是响应丢失后的自动重试。
+
+产物出现后取出当前铁锭整栈：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& .\scripts\test-furnace-tool.ps1 -Player Steve -Action take_output -Position 16,72,-324 -ItemName iron_ingot"
+```
+
+脚本直接调用 Node 现有工具接口，一次只发一个修改请求，打印 request_id 和真实结果。不启动服务、不接入 LLM、不重试超时；原 tool_calling 模型仍可从同一 Node 目录发现这些工具。自定义 Node 端口用 `-NodeUrl`。
+
+游戏验收还应检查：无煤但有木炭/原木时回退选料；燃料槽已有木炭时只同类补充；炉内是其它原料或产品时拒绝；输出 64 取出后可继续补料；背包不足、停止、断线、窗口被占用时正确终止。自动化测试使用受控世界/窗口及官方 API 插件，不能代替真实 Minecraft 验收。
 
 ## 11. 可以组合哪些实际流程
 
@@ -277,6 +321,8 @@ status/take 的调用格式示例：
 - 显式 verify_inventory 验证最终物品总量或任务期间增量；未提供最终验证条件时返回 finished_unverified，不报告整个目标完成。
 
 后台步骤的 wait_seconds 与 goto_position 参数中的 wait_seconds 不同：前者限制执行器的后续等待，默认 90 秒、最大 180 秒；后者限制单次导航工具返回前等待，最大 15 秒。
+
+Python `smelt_item` Skill 当前只启动熔炼：新增原料 1～64，优先填当前兼容炉，再把剩余量分配到其它炉；实际投放核验后结束并释放控制权，不等待产品、不自动补燃料、不取旧/新产品，尚未实现收集 Skill。use_existing 仅允许同工艺续接，输出满槽时跳过。completed 指投料完成，不能当成铁锭已入包；弱燃料待补量另行报告。原 Node start/status/take 与取产品工具保留独立能力，旧显式工具序列的等待合同保持。见 [熔炼技能说明](../agent/skills/smelt_item/SKILL.md)。
 
 **熔炼等待期间当前不会调度其他修改动作。** 后台序列仍持有整个任务租约，其他修改工具被拒绝；只读状态查询可进行。没有独立的威胁监测、安全撤离、暂停恢复或“炉子烧矿、Bot 同时干别的”的调度。
 
@@ -313,7 +359,7 @@ status/take 的调用格式示例：
 
 - 自然语言复杂目标自动分解、动态重规划、长期记忆和自主学习。
 - 自动寻找所有缺失原料、探索未加载区域、无限采集或持续挖矿。
-- 已占用熔炉的追加/共享、独立补燃料、满栈分批取出、跨熔炉调度。
+- 跨熔炉自动调度、取回原料/燃料、输出任意数量分取；已有炉子现在可用子工具同类补充，取产品仍为当前整栈。
 - 熔炼时自动安排其他工作、发现敌人自动撤离并在安全后恢复任务。
 - 任意生物战斗、持续追击、自动打到死亡、远程武器或完整防御策略。
 - 通用道具使用、任意功能方块、任意模组协议/容器、任意 Minecraft 版本兼容。
@@ -354,4 +400,4 @@ HTTP 外层还有一层 `{success,data,error}`，因此工具自身结果位于�
 
 同一操作重试前保留原 requestId 以便核对；新操作使用新 ID。停止或生命周期变化后重新获取目录代次。不要擅自获取新代次继续已取消的旧任务。后台租约、回执查询和任务提交格式见 [前置接口说明](tasks/task007-preparation.md)。
 
-本文是源码能力指南。工具目录当前共 36 项，具体定义以 GET /api/tools 为准。Task 006.5 阶段 C 新增了只读采集来源查询及采集 Skill，自动化结果和游戏验收清单见 [阶段说明](tasks/task0065-skills.md#阶段-cgather_resource)；没有重新进行 Minecraft 游戏验收或真实 LLM API 测试。自动化通过不能替代组合流程的实际游戏测试。
+本文是源码能力指南。工具目录当前共 39 项，具体定义以 GET /api/tools 为准。Task 006.5 阶段 C/D 与熔炼前置子工具的实现、自动化结果和游戏验收清单见 [阶段说明](tasks/task0065-skills.md)。本次没有连接真实 Minecraft 或请求付费 LLM。自动化通过不能替代组合流程的实际游戏测试。

@@ -5,7 +5,7 @@
 1. 注册表校验 Skill 名称和参数，复用共享执行器取得 Node 租约，心跳持续维护。
 2. 通过 `/api/world` 读取 Bot 位置、维度、背包；不可用背包不能当成零物品。
 3. `resolve_resource(kind=item)` 解析 resource 为真实物品名。未知/歧义返回 RESOURCE_UNKNOWN/RESOURCE_AMBIGUOUS，保留候选供澄清。
-4. 记录初始数量，计算 max(0, count - 当前数量)。已达标直接进入最终验证，不查询来源、不挖掘。
+4. 记录初始数量，计算 max(0, count - 当前数量)。`count` 允许 1～256，是背包目标总数；已达标直接进入最终验证，不查询来源、不挖掘。
 
 ## 2. 确认来源与工具
 
@@ -17,7 +17,7 @@
 ## 3. 有限搜索与安全接近
 
 1. 每轮先读背包，达标立即结束。
-2. 对每种来源调用 `find_block`，最多 16 格、每种最多返回 16 个候选；按实际三维距离排序，并限制在初始球形范围。
+2. 对每种来源调用 `find_block`，最多 16 格、每种最多返回 16 个候选；按实际三维距离排序，并限制在当前采集位置的球形范围。每次确认拾取后，下一轮以 Bot 新位置重新划定范围。
 3. 选最近、未尝试过的坐标。记录尝试次数，脚下支撑直接跳过，不能重复锁定该坐标。
 4. 足够近时 `inspect_block`；名称、可见性和可挖标记有效才继续。
 5. 需要接近时 `find_interaction_positions` 查询站位，最多尝试 3 个。导航用 `goto_position(wait_seconds=0)`，pending 只通过 `get_movement_task` 等待原 taskId，单次等待最多 75 秒。
@@ -26,7 +26,7 @@
 ## 4. 单次挖掘
 
 1. 重新读取背包数量，记录本次挖掘前数量；此时若已达标就不挖。
-2. `mine_block(block_name, position, tool_name?)`；Node 执行既有采集条件、保护方块、距离、视线、耐久和脚下支撑检查。
+2. `mine_block(block_name, position, tool_name?)`；未指定工具时 Node 优先从运行时方块工具定义和挖掘速度中选择背包内的合适工具；没有合适工具才尝试空手，并执行采集条件、保护方块、距离、视线、耐久和脚下支撑检查。
 3. UNSAFE_TARGET/NO_LINE_OF_SIGHT/OUT_OF_RANGE/BLOCK_CHANGED/NOT_DIGGABLE/CHUNK_UNAVAILABLE/PROTECTED_BLOCK 允许跳过该坐标；缺工具、错误工具、耐久不足等真实失败停止并保留原错误码。
 4. 只有 blockRemoved=true 才进入拾取阶段；未确认移除或工具结果 uncertain 时立即结束，不重发挖掘。
 

@@ -2,7 +2,7 @@
 
 ## 阶段 A 交付范围
 
-阶段 A 建立了 Skill 接口、独立注册表、严格参数校验、执行适配、后台 API 和最终目标核验；当时生产注册表为空。当前已实现阶段 B 搜索和阶段 C 采集，生产目录注册了 `explore_and_find`、`gather_resource`，详见后文。合成、熔炼 Skill、LLM Skill 选择、Minecraft 进度回复在后续阶段接入。Task 006 的自然语言 Tool Calling、本地聊天指令和显式后台任务接口继续使用原行为。
+阶段 A 建立了 Skill 接口、独立注册表、严格参数校验、执行适配、后台 API 和最终目标核验；当时生产注册表为空。当前已实现阶段 B 搜索、C 采集、D 合成和 E 熔炼，生产目录注册了 `explore_and_find`、`gather_resource`、`craft_item`、`smelt_item`，详见后文。LLM Skill 选择、Minecraft 进度回复留待阶段 F。Task 006 的自然语言 Tool Calling、本地聊天指令和显式后台任务接口继续使用原行为。
 
 没有新增依赖，没有修改 `.env`、密钥或认证缓存。Python 仍只通过 Node 工具执行游戏操作。
 
@@ -29,6 +29,18 @@ agent/
       skill.py
       SKILL.md
       SOP.md
+    craft_item/      # 阶段 D：配方/材料/工作台检查、合成与产物核验
+      __init__.py
+      metadata.py
+      skill.py
+      SKILL.md
+      SOP.md
+    smelt_item/      # 阶段 E：选炉/原料与燃料投放/实际转移核验后结束
+      __init__.py
+      metadata.py
+      skill.py
+      SKILL.md
+      SOP.md
   app/
     execution/
       models.py      # 共用 ExecutionRequest，保留原 TaskRequest
@@ -38,16 +50,20 @@ agent/
     test_skills.py   # 测试专用 Skill、Mock HTTP 与真实 Node HTTP 集成
     test_explore_and_find.py # 搜索 Skill 的单元及 HTTP 集成测试
     test_gather_resource.py # 采集 Skill 的单元及真实 Node HTTP 测试
+    test_craft_item.py # 合成 Skill 的单元、Mock 与真实 Node HTTP 测试
+    test_smelt_item.py # 熔炼 Skill 与真实 Node HTTP/官方熔炉插件集成
 scripts/
   test-explore-skill.ps1 # 手动提交与轮询真实 Skill 的测试入口
   test-gather-skill.ps1 # 采集 Skill 测试入口
+  test-craft-skill.ps1 # 合成 Skill 测试入口
+  test-smelt-skill.ps1 # 熔炼 Skill 测试入口
 ```
 
 `Skill` 必须声明 `name`、`description`、`parameters`、`preconditions`、`success_criteria`、`required_tools`。参数模型继承 `SkillParameters`，拒绝额外字段、字符串数字和非有限数值。
 
 执行顺序为：验证 Skill/参数 → 获取真实 Node 工具目录 → 核对依赖工具 → 取得原执行器租约 → 读取快照/检查前置条件 → 确定性 execute → 读取新快照 → verify 全部完成条件 → 释放租约。只有独立核验通过，才能标记 `completed`。
 
-Skill 的 `execute(runtime, parameters)` 返回普通 JSON 对象；`verify(parameters, data, before, after)` 返回 `SkillVerification`，每个检查包含 criterion、passed、observed。criterion 必须覆盖该 Skill 声明的所有完成条件，不允许空验收。具体 Skill 的材料、目标、设施检查由各自的 `check_preconditions` 实现，通用层负责 Bot 可用性和依赖工具存在性。
+Skill 的 `execute(runtime, parameters)` 返回普通 JSON 对象；`verify(parameters, data, before, after)` 返回 `SkillVerification`，每个检查包含 criterion、passed、observed。criterion 必须覆盖该 Skill 声明的所有完成条件，不允许空验收。具体 Skill 的材料、目标、设施检查由各自的 `check_preconditions` 或 `execute` 中的修改前阶段实现，通用层负责 Bot 可用性和依赖工具存在性。
 
 `SkillRuntime.call(tool, arguments, operation_id=..., wait_seconds=...)` 通过原执行器调用工具。参数按当前 Node Schema 再校验；同一 operation_id/参数重复只返回原结果，变更参数则报冲突。相同参数的两次有意操作必须使用不同 ID，调用数量受总预算限制。未知结果查询原回执，不能更换 ID 重发修改工具。
 
@@ -66,14 +82,14 @@ Skill 的 `execute(runtime, parameters)` 返回普通 JSON 对象；`verify(para
 
 外层保持 `{success,data,error}`；HTTP 202 外层 success 仅表示提交成功。内层 SkillResult.success 只有最终状态 completed 时才为 true；pending/running 时 success=false、error=null，不表示请求失败。
 
-请求合同示例（`craft_item` 要到阶段 D 才注册，当前提交将得到 UNKNOWN_SKILL）：
+请求合同示例（阶段 D 已注册 `craft_item`）：
 
 ```json
 {
   "player": "Steve",
   "request_id": "craft-001",
   "skill": "craft_item",
-  "arguments": {},
+  "arguments": {"item_name": "crafting_table", "count": 1},
   "timeout_seconds": 300,
   "max_tool_calls": 96
 }
@@ -87,7 +103,7 @@ Skill 的 `execute(runtime, parameters)` 返回普通 JSON 对象；`verify(para
 
 ## 已知风险及后续解决方案
 
-以下记录阶段 B～F 的风险方案。阶段 B 的有限搜索、站位接近、实体解析及进度观察、阶段 C 的采集与拾取已实现；合成/熔炼与 LLM 接入仍按表中阶段推进，不依赖 Memory。
+以下记录阶段 B～F 的风险方案。阶段 B 搜索、C 采集、D 合成及 E 熔炼已实现；LLM Skill 选择仍按阶段 F 推进，不依赖 Memory。
 
 | 风险 | 处理方案 | 实施阶段 |
 | --- | --- | --- |
@@ -96,9 +112,9 @@ Skill 的 `execute(runtime, parameters)` 返回普通 JSON 对象；`verify(para
 | 搜索到但走不过去，或站到目标脚下卡住 | 共用有限候选站位选择：粗靠近后 find_interaction_positions，最多尝试有限候选，每次导航结束后重新检查距离、视线和目标是否改变。排除目标方块上方及当前脚下支撑；UNSAFE_TARGET/NO_LINE_OF_SIGHT 触发有限换站位或换资源目标，不反复挖同一位置。不能改成允许破坏脚下支撑 | B、C、D、E |
 | 挖掉方块却没有收到资源 | mine_block 只代表方块移除。先记录期望掉落物数量，再挖、检查是否已经自动拾取、必要时 collect_item，最后重新查背包。不能把方块名当掉落物名（如 stone→cobblestone、iron_ore→raw_iron）；以实际查询到的掉落候选或明确用户参数为准。遇到精准采集、时运和模组未知掉落规则时澄清，不硬编码整套掉落表 | C |
 | 资源候选被玩家挖掉，掉落物消失 | 每个交互前重新检查目标。记录已失败/已尝试候选并在本 Skill 内跳过，最多有限轮数；实体消失没有背包增量时只能 uncertain，不能确认拾取成功。这里的临时集合是执行状态，不是长期 Memory | B、C |
-| 采集数量理解不一致 | gather_resource.count 表示背包目标总数，扣除已有数量；craft_item/smelt_item.count 表示本次期望新增产物数。每个 Skill 在参数描述和结果中明确 total/increase，核验使用同一口径。多产物配方按整批取整，报告实际数量，不虚报精确数量 | C、D、E |
+| 采集数量理解不一致 | gather_resource.count 表示背包目标总数，扣除已有数量；craft_item.count 表示本次期望新增产物数；smelt_item.count 表示本次新投入原料数，产物新增目标由 Node 配方给出。结果明确 total/increase，核验使用同一口径。多产物配方按整批取整，报告实际数量，不虚报精确数量 | C、D、E |
 | 工作台存在但材料不足/设施不可达 | 先 inspect_recipe，区分背包配方和 requiresTable，返回材料缺口；需要工作台才搜索、接近和重新检查。阶段 D 不自动采集材料、建工作台或递归调用其它 Skill，避免提前引入 Planning | D |
-| 熔炉被占用，输出满 64，或别人改动炉子 | start 前读取 open_furnace，严格复用当前空炉约束；占用时报告炉况，找其它空炉或请求用户处理，不擅自取走他人物品。当前单批最多 8，take 要求整批输出相等，无法处理 64 输出栈。需要共享炉管理时，另行扩展有明确槽位和数量验证的 Node 工具后再接 Skill | E |
+| 熔炉被占用，输出满 64，或别人改动炉子 | 已补齐 furnace_* 子工具及阶段 E Skill：每次重读炉况，不同工艺跳过另选；use_existing=true 才允许续接兼容旧队列、整栈取出旧产物。最多 8 件队列且旧产品单独计数；投料后变化则停止，不切炉重投。旧原子 smelt_item 合同保留 | E 已实现，游戏验收待执行 |
 | 熔炼完成被误报为已取出 | start 只一次；复用后台 status/take 续接，只在确认真实产物和背包新增数量后 completed。超时、取消后已投入物品留在炉内，报告原坐标与已发生步骤，不自动再次 start；恢复需先查询现场 | E |
 | 单批上限与长耗时冲突 | 第一版遵守 Tool 的真实限制，超出单批上限返回明确反馈；有界分批作为后续显式扩展，不能只是调大模型调用次数。Skill 后台执行使用独立总时限；阶段 F 的聊天只提交并返回执行 ID，后续进度/结果另行展示，不让整个熔炼卡住聊天 HTTP | E、F |
 | 多任务抢占、断线后迟到回调重复执行 | 阶段 A 已共用执行槽、Node instance/generation/lease、回执和幂等 ID；有变化即停止。后续补充游戏停止/死亡/重生/换维度验收。旧任务清理必须仍带旧租约，不能影响新任务 | A 已实现基础，F 游戏验收 |
@@ -245,10 +261,10 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/api/agent/skills/exec
 | 参数 | 约定 |
 | --- | --- |
 | resource | 必填，要入包的物品，如 oak_log、sand、cobblestone、raw_iron |
-| count | 必填，整数 1～64，背包目标总数，先扣除已有物品 |
+| count | 必填，整数 1～256，背包目标总数，先扣除已有物品 |
 | block_name | 可选，限定来源方块，经过运行时名称/来源校验 |
 | tool_name | 可选，指定背包中的工具，由既有 mine_block 校验并使用 |
-| search_radius | 默认 16，整数 1～16，初始位置周围的三维目标范围 |
+| search_radius | 默认 16，整数 1～16，Bot 当前采集位置周围、每轮重新划定的三维目标范围 |
 | max_blocks | 默认 16，整数 1～64，最多尝试的不同方块数，包含跳过/失败候选 |
 
 最小请求：
@@ -310,6 +326,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-gather-skill.
 - 背包满由拾取工具检查，当前没有完整的挖前容量预检；失败时已经挖出的物品可能仍在地面，不会自动丢弃其它物品腾空间。
 - data 保留 initial_count、current_count、collected（相对初始数量的净增加）、remaining、来源与扫描/截断标记、尝试和挖掘数量；最近 16 条 attempts 用于观察，完整工具账本在 steps。
 - 不探索新路点、不挖隧道、不合成工具，不会为了采集而放置方块或攻击。资源不足或预算耗尽时报告真实缺口，不表示世界中没有资源。
+- count 虽允许 1～256，但当前单次搜索最多尝试 64 个方块，且搜索半径、背包空间、工具耐久和工具调用预算仍有限；大目标可能需要分批执行或后续扩展任务预算。
+- 每轮搜索中心取 Bot 当前采集位置；确认拾取后下一轮会重新划定范围，不再固定在任务起点，但仍只搜索有限的已加载区域。
+- `mine_block` 未指定 `tool_name` 时优先按运行时方块工具定义/挖掘速度选择合适工具；没有合适工具时才尝试空手。若空手也无法采集，返回 `TOOL_MISSING`，不会继续尝试破坏。
 
 ### 真实 Minecraft 验收
 
@@ -322,7 +341,240 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-gather-skill.
 7. 接近/挖掘/拾取途中发「停止」、取消或断线：确认后续工具终止，重连不恢复旧任务。
 8. 回归搜索 Skill、你好/状态/背包/附近/环境，以及跟随/停止/坐标导航和旧 Tool Calling。
 
-尚未有真实 Minecraft 会话用于以上验收，不将自动化测试通过视为游戏测试通过。合成、熔炼 Skill 留待后续阶段。
+当时未有真实 Minecraft 会话用于以上验收，不将自动化测试通过视为游戏测试通过。阶段 D 合成与阶段 E 熔炼见下文。
+
+## 阶段 D：craft_item
+
+第三个 Skill 已注册，独立目录 `agent/skills/craft_item/` 包含 SKILL.md、metadata.py、SOP.md、skill.py、__init__.py，未添加辅助资源。详细参数、命令、流程及限制见 [技能说明](../../agent/skills/craft_item/SKILL.md) 和 [SOP](../../agent/skills/craft_item/SOP.md)。
+
+### 实现与调用
+
+本阶段复用 Node 已有的 `resolve_resource`、`inspect_recipe`、`find_block`、`inspect_block`、`find_interaction_positions`、`goto_position`、`get_movement_task` 和 `craft_item`，没有新增或修改 Node 合成工具/配方实现，没有引入依赖。
+
+| 参数 | 合同 |
+| --- | --- |
+| item_name | 必填，目标物品名/运行时显示名，经 Node 解析 |
+| count | 默认 1，整数 1～16，本次希望新增的产物数量；不扣除已有产物 |
+| search_radius | 默认 16，整数 1～16，以任务起点为球心搜索工作台 |
+| table_position | 可选整数坐标 {x,y,z}，限定工作台位置，仍须在搜索范围内 |
+
+先读真实背包和 `inspect_recipe`，缺材料立即报告 MATERIALS_MISSING 与缺口，不移动。可行配方优先使用无需工作台的一种；需要工作台才搜索/接近/复查。导航 pending 复用原 taskId，单次等待最多 75 秒。最多考察 8 个台子，每个最多 3 个站位；总过程仍受共享时间、调用和取消预算限制。
+
+合成前重新读材料与工作台状态；一次调用 Node 合成工具，由它管理工作台窗口。不调用 open_workbench 保持窗口，也不重新实现底层合成。未知结果只查询原回执，不更换 ID 重发合成。
+
+默认背包配方例子：
+
+```json
+{
+  "player": "Steve",
+  "request_id": "craft-table-001",
+  "skill": "craft_item",
+  "arguments": {"item_name": "crafting_table", "count": 1},
+  "timeout_seconds": 300,
+  "max_tool_calls": 96
+}
+```
+
+同名 Skill 与 Node Tool 的名字位于各自注册表中，不能混用 API；自然语言 Skill 选择仍留待阶段 F。当前普通聊天中的 Tool Calling 行为保留。
+
+### 命令 → 工具顺序 → 验证
+
+在 Minecraft 给 Bot 5 个铁锭，16 格内放置工作台，重启两个服务后，在项目根目录分别执行（Steve 换成真实玩家昵称）：
+
+```powershell
+Set-Location 'D:\桌面\MineMate'
+```
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-craft-skill.ps1 -Player Steve -ItemName iron_helmet -Count 1
+```
+
+顺序：`resolve_resource` → 快照 → `inspect_recipe` → `find_block(crafting_table)` → 必要时 `find_interaction_positions` / `goto_position` / `get_movement_task` → `inspect_block` → 材料/配方/工作台复查 → `craft_item(position)` → 快照核验。无需工作台的配方省略设施和导航步骤。
+
+成功要求真实背包中目标物品相对执行前净增加至少 count，且初始与最终维度一致。例如背包已有 1 个头盔，再请求 1 个，必须最终至少有 2 个。请求 5 个木板可能实际产出 8 个，结果和验证均报告真实数量，不将工具的“完成”文字作为成功证据。
+
+data 记录 stage、count_mode=increase、初始/当前数量、actual_increase、预检配方、material_shortages、table_position/table_attempts 和 tool_result；完整 Tool 执行记录在 steps。材料缺口最多展示 4 种候选，各候选是替代关系，不能相加。
+
+### 自动化结果（2026-11-23）
+
+- Python 全量：`agent/.venv/Scripts/python.exe -X utf8 -m unittest discover -s test`，**192 项通过**。
+- 新增 `test_craft_item.py` 共 **23 项**：严格参数及坐标、注册、无工作台/需工作台合成、已有产物仍新增、整批产量、材料缺口、缺配方、设施变化/不可达/视线、移动后材料复查、断线/维度变化、超时/取消、未知结果与幂等回执、预算、HTTP 和最终独立核验。
+- 其中一个集成测试运行真实 Node HTTP、工具注册表/租约、Mineflayer 配方查询与 1.21.4 数据，依次验证木板、工作台、铁头盔；背包、世界和实际合成动作均为受控模拟，未连接 Minecraft。
+- Node 全量 `npm.cmd test`：**157 项通过**，旧搜索/采集/移动/聊天等测试保留。旧 Skill 的目录断言仅更新为包含新注册的 craft_item，功能断言未放宽。
+- 新 Python 文件编译检查、PowerShell 脚本语法检查通过。现有虚拟环境为 Python 3.14.10；尚未单独验证目标 Python 3.12 环境。
+- 未使用真实付费 LLM，也未执行真实 Minecraft 会话。
+
+### 游戏验收与已知限制
+
+1. 交给 Bot 至少 4 个橡木木板，脚本目标 crafting_table/count=1：无需已有工作台就能完成，背包工作台真实增加 1。
+2. 交给 Bot 至少 2 个橡木原木，目标 oak_planks/count=5：应实际增加 8 个木板，报告整批取整。
+3. 交给 Bot 5 个铁锭，在 8～12 格外放置工作台，目标 iron_helmet/count=1：自动导航接近，合成后背包新增头盔。
+4. 背包已经有一个目标物品时再运行：仍应新增请求数量；同一 request_id 重复提交只查原执行，不能再次合成。
+5. 材料不足时检查 material_shortages；例如少于 5 个铁锭不能合成头盔，不能仅因找到工作台而开始移动/合成。
+6. 无工作台、工作台被拆/隔墙不可见/不可达时明确失败；停止/取消/断线应终止后续调用，未发生的合成不能继续，已消耗材料不回滚。
+7. 检查满背包、已有窗口以及原有聊天、跟随、停止、坐标导航、搜索和采集 Skill。工具可能返回失败/uncertain，不应自动丢弃物品。
+
+当前缺材料不会采集/递归合成中间产物，不会自动放工作台。16 格内没有可用台子即报告，不探索整个世界。Node 合成时自行选择满足条件的真实配方，Skill 只做预检，不锁定 recipe ID；特殊/模组配方、元数据不完整和回收净产量不满足的配方可能不支持。满背包的完整前置容量规划仍未实现。
+
+本阶段代码与自动化已交付；用户随后反馈合成游戏测试通过。阶段 E 熔炼见后文，不能把前序验证推广为新熔炼 Skill 已通过游戏验收。
+
+### 工作台接近距离修复（2026-11-23）
+
+平地、有工作台和材料仍可能出现 WORKBENCH_UNREACHABLE_OR_CHANGED：先前 Skill 选取的可交互站位可能位于 4.5 格交互边缘，而通用导航默认 GoalNear 半径 2，会在距离站位两格时报告 arrived。两种距离相叠加后，Bot 实际仍够不到工作台。
+
+修复为：Node `goto_position` 新增可选 `arrival_range`（0～2、默认 2），沿用原移动控制器与 GoalNear；0 要求进入指定脚部方块。合成 Skill 到候选站位时显式传 0，再检查实际距离/方块名称/视线。原聊天和独立 HTTP 导航保留默认两格，不另建寻路控制器。
+
+新的 workbench_check 保存 Bot/目标坐标、interaction_distance、maximum_distance=4.5、actual_name、visible 和 reason。失败时 Python 终端打印“工作台最后检查”，测试脚本也显示最后检查摘要，能够区分 OUT_OF_RANGE、CHUNK_UNAVAILABLE、BLOCK_CHANGED、NO_LINE_OF_SIGHT。它是最后一次检查结果，完整导航与站位尝试仍须结合 steps 查看。
+
+回归测试加入默认两格提前停止的 Skill 模拟，以及真实 pathfinder A* 的平地路径终点对比；原测试使用精确站位的模拟未覆盖到达误差。真实 Node HTTP 测试也按到达半径模拟停车。更新后须同时重启 Node 与 Python，再用原铁头盔命令验收，仍不能将内存地形/Mock 测试视为真实 Minecraft 验收。
+
+本次合成专项 24 项、移动专项 43 项通过；最终 Python 全量 **193 项通过**、Node 全量 **159 项通过**。首轮 Python 全量曾有搜索/采集两项回环集成因 5/12 秒外层等待到期而被取消，单独复跑确认存在时间波动；测试改用短轮询、30 秒外层等待，功能断言及产品超时/取消专项断言保持原样，最后全量通过。Python 编译、PowerShell 脚本语法及差异检查通过。未连接真实 Minecraft。
+
+## 阶段 E 前置：独立熔炉槽位工具（2026-11-23）
+
+按用户要求，先实现添加原料、添加燃料、补充原料、补充燃料、取出产品。添加/补充采用同一个增量语义，注册三个工具覆盖五种操作。当时只交付子工具；用户反馈子工具游戏测试通过后，继续实现下文的阶段 E Skill。
+
+### 文件与合同
+
+- `minecraft-bot/src/tools/crafting/furnace.js`：注册 furnace_add_input、furnace_add_fuel、furnace_take_output；复用现有 interact/窗口生命周期及原注册表调度，不开第二套游戏控制入口。
+- `crafting/data.js`：集中存放原 SMELTING 和共享 FUEL，已有 crafting/index.js/recipes.js 改为引用此单一来源；旧 index.js 导出仍兼容。
+- `interaction/adapters/furnace.js`：保留原字段并附加 fuelSeconds/totalFuelSeconds（未知为 null），支持核验燃料即时燃烧。
+- `agent/app/tool_loop.py`：增加新工具的调用指导和明确错误回复；Schema 仍由 Node 返回，不复制到 Python。
+- `minecraft-bot/test/furnaceTools.test.js`、`agent/test/test_tool_loop.py`：覆盖行为、官方插件接口、真实 HTTP 和 Python 动态目录/转发。
+- `scripts/test-furnace-tool.ps1`：一次调用一个 Node 工具，自动读取当前目录、实例 ID 和 generation，打印 request_id 和结果，不重发副作用。
+- README、AGENTS、工具指南同步更新。依赖、真实 .env、密钥和缓存未修改。
+
+详细参数、独立测试命令与游戏验收见 [工具指南 10.3～10.4](../tools-guide.md#103-添加补充与独立取出)。新工具添加/补充 count 是本次增量、1～64；燃料默认 1 件。空燃料槽优先煤炭，其次使用共享支持表中的已知可燃物。非空槽只同类补充；所选燃料不足时拒绝，不偷偷混用或减少数量。
+
+独立产品取出使用官方 takeOutput，可在炉子仍在加工时取当前输出整栈（含 64 个）。count 可省略；显式值必须等于当前栈，部分取出尚未开放。核对官方源码发现，通用 transfer 的部分取出会尝试将余量放回来源，而熔炉输出槽只读，因此没有采用该方式。加工中取出保守预留完整输出栈的背包容量，避免 putAway 的余量处理造成掉落。
+
+投料、加燃料、取产品均检查窗口背包和炉槽的真实增减；允许已确认的原料转产品、燃料即刻消耗等变化；属性未知时有界观察，仍无法确认则 uncertain。工具 completed 只表示本次槽位操作已确认，不表示熔炼目标完成。
+
+原料/产品冲突会拒绝，不清空其它工艺。输出满时先显式取出产品，再补料。自动挑选其它炉子及整个熔炼目标的等待/最终验证由下一阶段 Skill 负责。
+
+### 本次实际自动化结果
+
+- 新熔炉专项 **19 项通过**，包括添加/补充、煤炭优先与缺煤回退、燃料冲突/容量、满栈取出、加工/燃烧并发变化、未知结果、参数、取消/断线/超时、幂等回执、真实 HTTP 与实际 Mineflayer 熔炉插件。
+- Node 全量 `npm.cmd test`：**178 项通过**。
+- Python 全量 `.venv/Scripts/python.exe -X utf8 -m unittest discover -s test`：**195 项通过**；含新增炉槽 Tool Calling 转发/冲突反馈与真实 Node Schema 合同检查。
+- Python 编译、PowerShell 测试脚本语法检查通过。
+- 测试使用受控窗口/背包/内存世界，官方插件与 HTTP 是真实调用；未进入 Minecraft、未请求付费 LLM，不等同于游戏验收。
+
+### 需要实际游戏验证
+
+1. 向空炉添加 3 个粗铁，自动加煤，确认输入槽与 Bot 背包数量相符。
+2. 加工中再补 3 个粗铁、补 1 个煤，确认不要求炉子为空、不替换已有原料和产品。
+3. 背包无煤而有木炭/原木时自动回退；燃料槽已有木炭时，即使背包有煤也只同类补充。
+4. 炉子已有不同原料/不同产品时拒绝；数量/容量不足时不静默少投，不自动清炉。
+5. 输出满 64 时独立取出整栈，验证实际入包 64，然后可继续补料；加工中取出也核对实际数量。
+6. 背包满、窗口占用、停止/取消/断线时终止后续操作；未知结果不重复投料。回归旧 smelt_item 接口以及已通过的三个 Skill。
+
+## 阶段 E 当前合同：仅启动熔炼
+
+按最新需求，已有 `smelt_item` Skill 改为仅将原料/燃料放进兼容炉，核验实际转移后结束。实现仍复用原选炉、导航、同工艺检查、煤炭优先、同类燃料补充、64 上限、先填当前炉再分配剩余量，以及取消/超时/幂等处理。没有新增收集 Skill、后台监视器或其它游戏能力。
+
+不调用任何取产品工具，不等待加工、不自动续补。use_existing=true 仅续接兼容原料并保留产品，输出满 64 时跳过。默认不使用已有原料/产品。弱燃料只先填一栈，未投入需求记录为 fuel_pending_count，requires_fuel_followup 提示之后需处理；燃烧余量不可确认时明确未知。旧 wait_timeout/-WaitTimeout 保留兼容但不生效，执行超时与取消仍限制找炉和投料过程。
+
+完成条件变为 input_deposited、fuel_deposited、furnace_load_confirmed、same_dimension：核验实际背包消耗及炉内原料/产品按 Node 配方折算守恒，允许投料期间自然加工。SkillResult.completed 只表示投料目标完成，data.completion_scope=furnace_loading、stage=loaded、smelting_completed=null。投料后释放租约，Bot 可立即执行其它任务；材料留炉内，不回滚。详细当前参数、字段、工具顺序与验收见 [SKILL.md](../../agent/skills/smelt_item/SKILL.md) 和 [SOP](../../agent/skills/smelt_item/SOP.md)。
+
+修改文件：`agent/skills/smelt_item/{metadata.py,skill.py,SKILL.md,SOP.md}`、`scripts/test-smelt-skill.ps1`、`agent/test/test_smelt_item.py`、`agent/skills/models.py`（仅同步预算注释）；同步 README、AGENTS、Node README、tools-guide 和本任务说明。Node 原工具及其它 Skill 的实现不修改；旧等待/收取测试根据主动变更的 Skill 合同改为投料、保留产物、无等待、后续移动、部分失败、取消和实际转移验证，原底层工具测试继续保留。
+
+游戏验收：重启服务，空炉+64 粗铁+8 煤，执行原脚本 -Count 64。确认投料后即返回成功，炉中继续加工、产品不进入 Bot 背包，再发送移动指令验证控制权已释放；-UseExisting 检查同工艺产品保留、输出满槽跳过、按 54+10 分配，以及弱燃料待补提示、停止/断线不继续操作。真实 Minecraft 此次变更尚待用户验证。
+
+本次最终自动化结果：Python 全量 **246 项通过**，其中熔炼 Skill **51 项**；Node 全量 **180 项通过**。覆盖投料即结束、无产品等待、无取出调用、旧产品保留、满输出槽换炉、64 件及多炉投料、弱燃料待补提示、部分失败、取消/断线、响应丢失幂等、独立背包/炉内守恒核验，以及释放控制权后立即执行移动任务。真实 Node HTTP、租约/注册表及官方 Mineflayer 熔炉插件的受控集成确认 64 件投料只提交一次，产品留在模拟炉内，未使用取出工具。Python 编译、PowerShell 语法、git diff --check 通过；未连接真实 Minecraft，未调用付费 LLM。
+
+## 阶段 E 历史实现：等待熔炼与取出（已由上述投料合同替代）
+
+用户反馈合成 Skill、独立熔炉子工具游戏测试通过后，基于现有工具实现了第四个 Skill。其 Python/HTTP 名称为 smelt_item，文档标识为 smelt-item，与旧 Node 同名原子工具分属不同注册表。本次未修改 Node 游戏逻辑、未安装依赖、未修改真实 .env。
+
+### 新增与修改文件
+
+- 新增 `agent/skills/smelt_item/`：`metadata.py` 为元数据/参数唯一来源，`skill.py` 负责选炉、投料、燃料、等待、取出和独立核验，`SKILL.md`/`SOP.md` 记录合同和步骤，`__init__.py` 提供导出。
+- 修改 `agent/skills/catalog.py` 注册第四个 Skill。
+- 新增 `agent/test/test_smelt_item.py`，旧搜索/采集/合成测试仅同步目录断言，功能断言保留。
+- 新增 `scripts/test-smelt-skill.ps1`：提交后台 Skill、轮询进度、显示完整结果；中断尽力取消，未知结果不重发。
+- 更新 README、AGENTS 和本任务说明。详细模块合同见 [技能说明](../../agent/skills/smelt_item/SKILL.md) 与 [SOP](../../agent/skills/smelt_item/SOP.md)。
+
+### 合同与执行策略
+
+| 参数 | 含义 |
+| --- | --- |
+| item_name | 必填，原料名称，例如 raw_iron，经 Node resolve_resource 解析 |
+| count | 默认 1，整数 1～64，本次新增投入原料总数，产物新增目标由 Node 配方返回 |
+| fuel_name | 可选指定燃料，经 Node 解析；未指定时优先煤炭或可用同类槽内燃料，替代燃料以 Node 定义为准 |
+| search_radius | 默认 16，整数 1～16，以任务起点为球心的三维炉子搜索半径 |
+| furnace_position | 可选整数坐标，指定后只检查该炉 |
+| use_existing | 默认 false；true 明确允许续接兼容旧原料并取该炉同类产物 |
+| wait_timeout | 每炉默认 900、最大 1500 秒；熔炼 Skill 整体默认 1200、最大 1800 秒，默认调用预算 192，其它 Skill 仍保持原超时合同 |
+
+一次最多查找 8 个炉子、每炉最多尝试 3 个交互站位，导航显式 arrival_range=0，按原 taskId 等待。不同工艺跳过另选；默认不使用已有原料/产品，允许复用现有燃料。指定了炉子位置则不会擅自换坐标。
+
+use_existing=true 时先整栈取出已有同类产品（含 64 个），每炉投入 min(本次剩余数量, 64-已有原料数量)。不因为当前炉放不下全部原料就跳过，先填该炉，再将剩余原料交给下一座兼容炉。满炉和其它工艺跳过；明确指定炉子时只用该炉。容量不足返回 INSUFFICIENT_FURNACE_CAPACITY，报告已投入量和 remaining_input，已投原料留炉内。旧产品、旧原料、本次目标分开核验：已有 64 铁锭、2 粗铁，再投 3 粗铁，应总取出 69，但本次新增目标仍是 3。炉内 10 粗铁、本次新增 64 时，应投 54 到第一炉、剩余 10 到第二炉，最终共取出 74。
+
+选择后复查炉况、配方和背包，每炉原料只投一次，最多 8 炉。使用 furnace_add_input / furnace_add_fuel / furnace_take_output，不使用旧 smelt_item(start)，避免执行器自动等待/取出造成重复。先完成各炉投料，再逐炉接近、等待和取出；炉子被动加工可以重叠，Bot 的操作仍串行。产物每次发现即可整栈收取；最后一件在取出期间完成时继续收取，满栈不会被当作无法取出的状态。furnaces 记录各炉真实投料/产物/最终槽位，独立验证全部使用炉。
+
+加工时约每 10 秒轮询一次，每炉最多 150 轮。确认空燃料槽、燃烧为零且连续至少 15 秒无原料减少或产物入包，才检查是否补充燃料；每炉最多续补 3 次，每次后重置无进展计时。燃料总需求可超过一栈，但单次最多 64，先装满燃料槽再按真实剩余量补充。只使用 Node 返回的燃料用量，预留本次尚未投炉原料，不把可燃原料的预留数量拿去烧。
+
+写入后遇到炉况变化、未知结果、取消或断线，停止并保留进度，不换炉重投。已投入原料/燃料留在炉内，不回滚、不自动恢复。等待超时、轮询/补燃料/工具调用预算耗尽均有明确错误。
+
+### 命令 → 工具顺序 → 验证
+
+给 Bot 3 个粗铁和至少 1 个煤炭，在 16 格内放置普通熔炉，重启 Node/Python，分别执行（Steve 换成实际玩家名）：
+
+```powershell
+Set-Location 'D:\桌面\MineMate'
+```
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-smelt-skill.ps1 -Player Steve -ItemName raw_iron -Count 3
+```
+
+工具顺序：`resolve_resource` → 快照 → `inspect_smelting_recipe` → `find_block(furnace)` → 必要时 `find_interaction_positions/goto_position/get_movement_task` → `inspect_block/open_furnace` → 材料/炉况复查 → 一次 `furnace_add_input` → 必要时 `furnace_add_fuel` → 有界 `open_furnace` 轮询 / `furnace_take_output` → 最终快照与炉况核验。
+
+测试明确允许续接旧队列：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-smelt-skill.ps1 -Player Steve -ItemName raw_iron -Count 3 -UseExisting
+```
+
+预期最终结果 success=true、status=completed、verification.verified=true。独立检查：本次原料从背包真实减少、产品净增量达到含旧物品的全部目标、炉内输入/输出均清空、维度一致。剩余燃料可以留在炉内。不会把投料完成、工具文本或旧库存数量当作本次目标完成。
+
+data 包含阶段、炉子尝试/拒绝原因、furnace_check 交互诊断、真实炉况、初始/当前数量、existing_collected、existing_input、expected_total_take、input_submitted_count、fuel_plan/added/refills、output_taken、polls；完整工具账本在 steps。
+
+### 实际自动化结果
+
+- 新熔炼专项 **37 项**：注册/参数、正常串行、精确站位、资源/燃料解析、煤炭优先及替代燃料、明确指定燃料、现有燃料利用、预留原料、工艺冲突另选、续接许可和旧数量核算、64 产物、燃料耗尽/续补/上限、旧状态不重复加燃料、最后产物竞态、材料变化、工具失败、未知结果、回执恢复/去重、超时/取消、断线/换维度、调用预算、最终验证和 HTTP。
+- Python 全量 `.venv/Scripts/python.exe -X utf8 -m unittest discover -s test`：**232 项通过**。
+- Node 全量 `npm.cmd test`：**178 项通过**。
+- Python 编译、PowerShell 脚本语法、SKILL.md 标识/描述与差异检查通过。
+- 一个测试使用真实 Node HTTP、注册表/租约、实际 Mineflayer 熔炉插件与 prismarine 窗口，炉况、背包和加工时钟受控；确认只投一次原料/燃料，走原 taskId 导航、取出真实测试数据中的三铁锭。没有进入真实 Minecraft，没有请求付费模型。
+
+### 游戏验收与限制
+
+1. 三粗铁、一煤炭、附近普通炉：自动接近、投料、等待、收取，背包铁锭真实新增 3；原来已有铁锭不能减少本次目标。
+2. 缺原料时不导航/投料；无可用燃料时记录原因。炉内已有足量燃料时可以利用，不重复投入；无煤有足量木炭/木板时使用真实替代燃料用量。
+3. 最近炉子为其它工艺，附近另有空炉：跳过原炉，使用其它炉，不覆盖旧物品。
+4. 默认跳过炉内已有原料/产品；-UseExisting 时允许同工艺队列和 64 铁锭整栈取出，核对既有和新增数量分别报告。重点验证单炉 64 件完整加工、炉内 10 件再新增 64 时按 54+10 分配，以及总容量不足时报告真实已投/未投数量。
+5. 加工中缺燃料、输出满栈、背包容量不足、炉况被别人改变：正确续补/取出或失败，不重投原料，不无限等待。
+6. 等待中发“停止”、取消、断线/换维度：后续工具停止，原料留炉，重连不恢复旧任务。回归你好/状态、移动、搜索、采集、合成和旧炉槽工具。
+
+当前本次新增原料为 1～64，每炉总原料队列容量 64，优先填当前炉后分配剩余量；等待时间、每炉最多 150 轮轮询和调用预算仍有限。普通炉搜索为起点 16 格内，不探索/造炉/采矿/递归准备材料，不并行执行其它游戏任务；只支持 Node 已实现的普通熔炉配方/燃料。取产品仍是整栈，加工中须预留完整栈容量，未知燃烧属性可能导致等待到上限或无法确认燃料充足。自然语言自动选择 Skill 及 Minecraft 进度回复留待阶段 F。
+
+### 同工艺续接队列修复验证
+
+修复前已通过回归测试复现“炉内 2 粗铁 + 新增 7 粗铁”返回 NO_COMPATIBLE_FURNACE/QUEUE_LIMIT。修复后 Python 全部 236 项、Node 全部 179 项通过；新增覆盖续接 9 件、总队列 64 件边界、超容量不投料、弱燃料槽容量和超过 8 件队列熄火后的补燃料。Python 编译、PowerShell 语法及 git diff --check 通过。真实 Minecraft 的此次续接场景尚待用户验收；重启 Node/Python 后使用原 -Count 7 -UseExisting 命令复测，检查新投入原料仅 7 个、既有产物另计且最终实际入包。失败时脚本会额外打印各候选炉原因及队列数量。
+
+### 数量上限统一 64 与按炉容量投料
+
+此次修改文件：`agent/skills/smelt_item/{metadata.py,skill.py,SKILL.md,SOP.md}`、`agent/skills/models.py`、`scripts/test-smelt-skill.ps1`、`minecraft-bot/src/tools/crafting/{index.js,recipes.js}`、`agent/test/test_smelt_item.py`、`minecraft-bot/test/{execution.test.js,toolactions.test.js}`，以及根 README/AGENTS、Node README、本任务说明和 tools-guide。
+
+熔炼原料、燃料、取出数量的单次上限统一为 64。Skill 保持 count 为本次新增原料总数，不擅自超出玩家要求；先填当前兼容炉，装满后仅把未投部分分配到其它炉。若所有可用炉均已检查仍有原料，明确报告失败及真实部分进度，已投材料不会回滚。弱燃料按槽容量分次补充，前炉未来续补量为其预留，不能重复承诺给下一炉。整栈默认等待与总预算见上表；旧显式工具序列的步骤时限不扩展，完整熔炼使用 Skill API。
+
+最终 Python 全量 **242 项通过**，Node 全量 **180 项通过**；熔炼 Skill 共 **47 项**。新增/更新测试覆盖：64 件严格参数与预算、模拟经过 640 秒仍可完成、54+10 先填炉再分配、全部投料后再等待/取出、满炉换候选、总容量不足时保留已投/剩余量、弱燃料分次补充及跨炉预留、旧 start/status/take 的 64 件合同。真实 Node HTTP、注册表/租约、官方 Mineflayer 熔炉插件的受控集成测试也已升级为整栈 64 件，验证原料仅提交一次、产物实际进入模拟背包。Python 编译、PowerShell 语法及 git diff --check 通过；未连接真实 Minecraft。
+
+游戏验收：重启 Node 和 Python。先准备空炉、64 粗铁、8 煤及足够背包空位，运行测试脚本 -Count 64，确认实际新增 64 铁锭。再用 -UseExisting：第一炉已有 10 粗铁、另有空炉，准备本次新增 64 粗铁及覆盖旧/新队列的足量燃料，确认按实时空位尽量填第一炉，再给第二炉投剩余量，最终核验合计产物。最后只留一座容量不足的炉，确认报告部分投料、未投原料仍在背包；停止/断线时无后续投料和重复操作。
+
+代码与自动化已交付，新的熔炼 Skill 游戏验收仍待用户执行；前序子工具游戏测试通过不等于本组合流程已验收。
 
 ### 阶段 C 实际自动化结果
 

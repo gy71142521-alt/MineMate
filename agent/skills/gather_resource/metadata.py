@@ -16,7 +16,7 @@ Query = Field(min_length=1, max_length=64, pattern=r"^[^\x00-\x1f\x7f]+$")
 
 class GatherParameters(SkillParameters):
     resource: str = Query
-    count: int = Field(ge=1, le=64, description="背包中的目标总数，先扣除已有数量；不是额外采集数量。")
+    count: int = Field(ge=1, le=256, description="背包中的目标总数，先扣除已有数量；不是额外采集数量。")
     block_name: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[^\x00-\x1f\x7f]+$")
     tool_name: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[^\x00-\x1f\x7f]+$")
     search_radius: int = Field(default=16, ge=1, le=16)
