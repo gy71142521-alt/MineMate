@@ -27,6 +27,15 @@ class Settings:
     tool_calling_timeout: float = 90
     tool_api_timeout: float = 25
     tool_llm_max_tokens: int = 2048
+    memory_enabled: bool = True
+    memory_db_path: str = str(Path(__file__).resolve().parents[2] / "data" / "minemate-memory.sqlite3")
+    memory_context_window: int = 32768
+    memory_compaction_threshold: float = 0.75
+    memory_retain_turns: int = 6
+    memory_max_summary_chars: int = 4000
+    memory_max_tool_result_chars: int = 4000
+    memory_session_idle_days: float = 30
+    memory_auto_compact: bool = True
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -74,6 +83,41 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     tool_enabled = values.get("TOOL_CALLING_ENABLED", "false").strip().lower()
     if tool_enabled not in ("true", "false"):
         raise ValueError("TOOL_CALLING_ENABLED 必须为 true 或 false。")
+    memory_enabled = values.get("MEMORY_ENABLED", "true").strip().lower()
+    if memory_enabled not in ("true", "false"):
+        raise ValueError("MEMORY_ENABLED 必须为 true 或 false。")
+    auto_compact = values.get("MEMORY_AUTO_COMPACT", "true").strip().lower()
+    if auto_compact not in ("true", "false"):
+        raise ValueError("MEMORY_AUTO_COMPACT 必须为 true 或 false。")
+    default_memory_db = str(Path(__file__).resolve().parents[2] / "data" / "minemate-memory.sqlite3")
+    memory_db_path = values.get("MEMORY_DB_PATH", "").strip() or default_memory_db
+    if not memory_db_path or "\x00" in memory_db_path:
+        raise ValueError("MEMORY_DB_PATH 不能为空且不能包含空字符。")
+
+    def bounded_ratio(name: str, default: float) -> float:
+        try:
+            number = float(values.get(name, str(default)))
+        except ValueError:
+            raise ValueError(f"{name} 配置无效。") from None
+        if not 0.1 <= number <= 0.95:
+            raise ValueError(f"{name} 必须在 0.1–0.95 之间。")
+        return number
+
+    def bounded_int_range(name: str, default: int, minimum: int, maximum: int) -> int:
+        number = bounded_int(name, default, maximum)
+        if number < minimum:
+            raise ValueError(f"{name} 必须不小于 {minimum}。")
+        return number
+
+    def bounded_non_negative(name: str, default: float, maximum: float) -> float:
+        try:
+            number = float(values.get(name, str(default)))
+        except ValueError:
+            raise ValueError(f"{name} 配置无效。") from None
+        if not 0 <= number <= maximum:
+            raise ValueError(f"{name} 配置超出范围。")
+        return number
+
     return Settings(
         url, timeout, host, int(port_text),
         llm_api_key=values.get("LLM_API_KEY", "").strip(),
@@ -86,5 +130,14 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         tool_max_calls=bounded_int("TOOL_MAX_CALLS", 4, 50),
         tool_calling_timeout=bounded_number("TOOL_CALLING_TIMEOUT", 90, 120),
         tool_api_timeout=bounded_number("TOOL_API_TIMEOUT", 25, 60),
-        tool_llm_max_tokens=bounded_int("TOOL_LLM_MAX_TOKENS", 2048, 8192)
+        tool_llm_max_tokens=bounded_int("TOOL_LLM_MAX_TOKENS", 2048, 8192),
+        memory_enabled=memory_enabled == "true",
+        memory_db_path=memory_db_path,
+        memory_context_window=bounded_int_range("MEMORY_CONTEXT_WINDOW", 32768, 1024, 1_000_000),
+        memory_compaction_threshold=bounded_ratio("MEMORY_COMPACTION_THRESHOLD", 0.75),
+        memory_retain_turns=bounded_int_range("MEMORY_RETAIN_TURNS", 6, 1, 64),
+        memory_max_summary_chars=bounded_int_range("MEMORY_MAX_SUMMARY_CHARS", 4000, 256, 16000),
+        memory_max_tool_result_chars=bounded_int_range("MEMORY_MAX_TOOL_RESULT_CHARS", 4000, 256, 32000),
+        memory_session_idle_days=bounded_non_negative("MEMORY_SESSION_IDLE_DAYS", 30, 3650),
+        memory_auto_compact=auto_compact == "true",
     )

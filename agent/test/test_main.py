@@ -59,6 +59,32 @@ class MainApiTests(unittest.IsolatedAsyncioTestCase):
         response = await self.request("POST", "/api/game/stop", json={"username": "Steve"})
         self.assertEqual(response.status_code, 504)
 
+    async def test_memory_status_and_reset_endpoints(self):
+        class FakeMemory:
+            def __init__(self):
+                self.reset_player = None
+
+            async def stats(self, player):
+                return {"player": player, "events": 3, "summary": ""}
+
+            async def reset(self, player):
+                self.reset_player = player
+
+        original = main.memory_manager
+        fake = FakeMemory()
+        main.memory_manager = fake
+        try:
+            response = await self.request("GET", "/api/agent/memory/Steve")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["data"]["player"], "Steve")
+            response = await self.request("POST", "/api/agent/memory/Steve/reset")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(fake.reset_player, "Steve")
+            response = await self.request("GET", "/api/agent/memory/bad-name")
+            self.assertEqual(response.status_code, 400)
+        finally:
+            main.memory_manager = original
+
     async def test_invalid_node_response_is_not_exposed(self):
         self.client.error = NodeApiError(502, "INVALID_NODE_RESPONSE", "Node.js 返回格式无效。")
         response = await self.request("GET", "/api/game/world")

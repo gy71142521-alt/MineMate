@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 import uuid
 from contextlib import suppress
@@ -17,6 +18,13 @@ from .node_client import NodeApiError, NodeClient
 from .schemas import GotoRequest, MovementRequest
 from .intent import MessageRequest
 from .llm_client import LLMClient, LLMError
+from .memory import (
+    AdaptiveSummarizer,
+    MemoryConfig,
+    MemoryManager,
+    ModelSummarizer,
+    SQLiteEventStore,
+)
 from .message_handler import MessageHandler
 from .tool_client import ToolClient
 from .tool_loop import ToolLoop
@@ -37,17 +45,46 @@ skill_manager = SkillManager(skill_registry, task_manager)
 @asynccontextmanager
 async def lifespan(_app):
     configure_logging(secrets=(settings.llm_api_key,))
-    logger.info("[Agent] 服务启动 host=%s port=%d node=%s tool_calling=%s log_level=%s",
+    logger.info("[Agent] 服务启动 host=%s port=%d node=%s tool_calling=%s memory=%s log_level=%s",
                 settings.agent_host, settings.agent_port, settings.node_api_url,
-                settings.tool_calling_enabled, logging.getLevelName(logging.getLogger().level))
+                settings.tool_calling_enabled, bool(memory_manager),
+                logging.getLevelName(logging.getLogger().level))
+    if memory_manager is not None:
+        try:
+            await memory_manager.startup()
+        except Exception as error:
+            # Memory is auxiliary: a broken disk must not stop the game bot.
+            logger.error("[Memory] 初始化失败，将在本轮禁用持久记忆：%s", type(error).__name__)
     yield
     await task_manager.close()
+    if memory_manager is not None:
+        await memory_manager.close()
 
 
 app = FastAPI(title="MineMate Agent", version="0.1.0", lifespan=lifespan)
 client = NodeClient(settings)
 llm_client = LLMClient(settings)
-message_handler = MessageHandler(settings, llm_client, tool_loop=ToolLoop(settings, llm_client, ToolClient(settings)))
+memory_manager: MemoryManager | None = None
+if settings.memory_enabled:
+    memory_config = MemoryConfig(
+        context_window=settings.memory_context_window,
+        threshold_ratio=settings.memory_compaction_threshold,
+        retain_turns=settings.memory_retain_turns,
+        max_summary_chars=settings.memory_max_summary_chars,
+        max_tool_result_chars=settings.memory_max_tool_result_chars,
+        session_idle_days=settings.memory_session_idle_days,
+        auto_compact=settings.memory_auto_compact,
+    )
+    memory_summarizer = (
+        AdaptiveSummarizer(ModelSummarizer(llm_client))
+        if settings.llm_api_key and settings.llm_model
+        else AdaptiveSummarizer(None)
+    )
+    memory_manager = MemoryManager(
+        SQLiteEventStore(settings.memory_db_path), memory_config, memory_summarizer,
+    )
+message_handler = MessageHandler(settings, llm_client, tool_loop=ToolLoop(
+    settings, llm_client, ToolClient(settings), memory=memory_manager))
 
 
 def success(data: Any) -> dict[str, Any]:
@@ -151,6 +188,25 @@ async def forward(call: Callable[[], Awaitable[dict[str, Any]]]) -> JSONResponse
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return success({"service": "ok", "node_api": settings.node_api_url})
+
+
+@app.get("/api/agent/memory/{player}")
+async def memory_status(player: str) -> dict:
+    if memory_manager is None:
+        raise LLMError(503, "MEMORY_DISABLED", "记忆模块未启用。")
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,16}", player):
+        raise LLMError(400, "INVALID_ARGUMENT", "玩家名无效。")
+    return success(await memory_manager.stats(player))
+
+
+@app.post("/api/agent/memory/{player}/reset")
+async def memory_reset(player: str) -> dict:
+    if memory_manager is None:
+        raise LLMError(503, "MEMORY_DISABLED", "记忆模块未启用。")
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,16}", player):
+        raise LLMError(400, "INVALID_ARGUMENT", "玩家名无效。")
+    await memory_manager.reset(player)
+    return success({"player": player, "reset": True})
 
 
 @app.post("/api/agent/message")
