@@ -1,5 +1,5 @@
 const DEFAULT_AGENT = Object.freeze({
-  enabled: true, url: 'http://127.0.0.1:8000', timeout: 35000,
+  enabled: true, url: 'http://127.0.0.1:8000', timeout: 150000,
   maxConcurrent: 2, requestsPerMinute: 20, playerCooldown: 3000
 });
 const INTENTS = new Set(['conversation', 'query_status', 'follow', 'goto', 'stop', 'unsupported', 'clarification']);

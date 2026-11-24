@@ -34,6 +34,7 @@
 query_status
 inspect_inventory
 jump
+→ finish_task（模型显式结束）
 → 最终自然语言回复
 ```
 
@@ -41,8 +42,8 @@ jump
 
 - 不依赖寻路和地形；
 - 10 秒内完成；
-- 日志能清楚看到“选择工具 → 执行 → 结果 → 下一步”；
-- 失败时也能展示 `pending/uncertain/失败` 的终止策略。
+- 日志能清楚看到“选择工具 → 执行 → 结果 → 下一步 → finish_task”；
+- 失败时也能展示错误回填、重试/换工具/`update_plan`，以及模型用 `finish_task` 结束。
 
 讲解点：这不是模型直接控制游戏，而是“模型选工具、程序校验、Node 执行、真实结果回填”。
 
@@ -161,7 +162,7 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/api/agent/memory/Stev
    - Node 终端（`[Tools]`、`[Movement]`）；
    - Python 终端（`[Agent]`、`[Tools]`、`[Memory]`）。
 8. 提前完整跑一遍；把成功日志、Skill 执行 JSON、记忆查询结果保留为 fallback。
-9. 注意 Node 默认 `AGENT_TIMEOUT_MS=35s`；自然语言演示保持短任务，采集 Skill 走 Python 后台接口，不受该聊天超时限制。
+9. 注意 Node 默认 `AGENT_TIMEOUT_MS=150s`；复杂任务可能接近 Python `TASK_TIMEOUT`，演示前确认两端超时配置一致。采集 Skill 走 Python 后台接口，不受聊天超时限制。
 
 ## 5. 讲解话术要点
 

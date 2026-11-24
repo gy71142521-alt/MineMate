@@ -104,6 +104,49 @@ class LLMClient:
             )
             raise LLMError(502, "LLM_INVALID_RESPONSE", "模型返回格式无效。") from error
 
+    async def plan(self, messages: list[dict], tools: list[dict], *,
+                   system_prompt: str, max_tokens: int = 800) -> dict:
+        """Ask the model for a strict JSON plan-direct decision.
+
+        No tools are passed to the provider; the planner only sees compact tool
+        summaries in the user payload. Invalid JSON is a planner failure, not a
+        request to execute anything.
+        """
+        config = self.settings
+        if not config.llm_api_key or not config.llm_model:
+            raise LLMError(503, "LLM_NOT_CONFIGURED", "语言模型尚未配置。")
+        budget = max(256, min(2000, int(max_tokens)))
+        try:
+            context = json.dumps({"conversation": messages, "tools": tools},
+                                 ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError, RecursionError) as error:
+            raise LLMError(502, "LLM_INVALID_PLAN", "规划上下文无法序列化。") from error
+        body = await self._request({
+            "model": config.llm_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": context},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": budget,
+        })
+        try:
+            choice = body["choices"][0]
+            if not isinstance(choice, dict):
+                raise ValueError("choice must be an object")
+            if choice.get("finish_reason") not in (None, "stop"):
+                raise ValueError("incomplete plan")
+            content = choice["message"]["content"]
+            if not isinstance(content, str) or not 0 < len(content) <= 16000:
+                raise ValueError("invalid plan content")
+            value = json.loads(content)
+            if not isinstance(value, dict):
+                raise ValueError("plan must be an object")
+            return value
+        except (ValueError, KeyError, IndexError, TypeError) as error:
+            logger.warning("[LLM] 规划响应无效 error=%s", type(error).__name__)
+            raise LLMError(502, "LLM_INVALID_PLAN", "模型规划格式无效。") from error
+
     async def summarize(self, transcript: str, *, max_tokens: int = 800) -> str:
         """Compress a bounded transcript into a resume checkpoint.
 

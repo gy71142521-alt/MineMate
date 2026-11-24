@@ -157,3 +157,14 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 - 加载会话时必须修复残留的 step/turn/compaction 标记；不完整的工具调用块不得发送给模型。修改事件表结构需提升 `MEMORY_FORMAT_VERSION` 并提供迁移或明确拒绝旧库。
 - 新增 context 贡献、摘要器或存储后端时，必须保持 `EventStore`、`Summarizer` 接口可替换，并补充 `agent/test/test_memory.py` 或对应测试；Mock/回环测试不等同于 Minecraft 验收。
 - 记忆当前只在 `TOOL_CALLING_ENABLED=true` 的 Tool Calling 路径生效；旧意图模式保持原行为，若要接入必须先设计其上下文格式与回滚策略。
+
+## 13. 任务执行运行时（TaskRuntime）
+
+- 自然语言入口默认使用 `AgentRuntime`（`AGENT_EXECUTION_MODE=planned`）；旧 `ToolLoop` 仅保留为 `legacy` 兼容路径，不得在新功能中继续扩散旧“失败即结束”语义。
+- 简单目标可直接执行；复杂目标必须先由 Planner 生成结果导向步骤。Planner 只输出 strict JSON（direct/plan），不执行工具、不写坐标或固定工具序列。
+- 工具失败、`pending`、`uncertain` 必须作为 `role=tool` observation 回填，由模型决定重试、换工具、`update_plan` 或结束；不得把这些结果直接当成任务终态。
+- 任务是否结束由模型调用 `finish_task` 决定；普通文本不自动结束。Harness 只在步数、工具调用、总时限、连续错误、重复失败、只输出文字等上限触发时兜底结束，并返回诚实的不完整结果。
+- 同一工具+参数+错误不得无限重试；超过 `TASK_MAX_SAME_ERROR` 回填 `REPEATED_FAILURE`。所有兜底必须取消在途 Node 动作（如有）并关闭记忆 turn。
+- `update_plan` 只替换计划上下文，不直接执行工具；计划最多 8 步，修改次数受 `TASK_MAX_REPLANS` 限制。计划是单轮运行时上下文，当前不单独持久化为 memory 事件。
+- `finish_task`/`update_plan` 是 Python 控制工具，不进入 Node 注册表；Node 仍是游戏工具 Schema 唯一来源。Skill 目录和 `TaskManager` 不受该运行时改造影响。
+- Node 的 `AGENT_TIMEOUT_MS` 必须大于等于 Python `TASK_TIMEOUT`；修改超时需同时重启两端。新增控制工具/兜底策略必须补 `agent/test/test_runtime.py` 或对应测试。

@@ -26,6 +26,7 @@ from .memory import (
     SQLiteEventStore,
 )
 from .message_handler import MessageHandler
+from .orchestration import AgentRuntime
 from .tool_client import ToolClient
 from .tool_loop import ToolLoop
 from .execution.manager import TaskManager
@@ -83,8 +84,16 @@ if settings.memory_enabled:
     memory_manager = MemoryManager(
         SQLiteEventStore(settings.memory_db_path), memory_config, memory_summarizer,
     )
-message_handler = MessageHandler(settings, llm_client, tool_loop=ToolLoop(
-    settings, llm_client, ToolClient(settings), memory=memory_manager))
+tool_client = ToolClient(settings)
+legacy_tool_loop = ToolLoop(settings, llm_client, tool_client, memory=memory_manager)
+runtime = (
+    AgentRuntime(settings, llm_client, tool_client, memory=memory_manager)
+    if settings.execution_mode == "planned"
+    else None
+)
+# `planned` uses the planner/runtime; `legacy` preserves the old single-loop behavior.
+message_handler = MessageHandler(
+    settings, llm_client, tool_loop=legacy_tool_loop, runtime=runtime)
 
 
 def success(data: Any) -> dict[str, Any]:

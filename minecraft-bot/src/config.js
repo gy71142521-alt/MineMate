@@ -85,7 +85,7 @@ function parseConfig(env) {
   } catch { throw new Error('AGENT_API_URL 必须是无凭据的 HTTP 服务地址。'); }
   const agent = {
     enabled: enabled === 'true', url: agentUrl.origin,
-    timeout: readPositiveInteger(env, 'AGENT_TIMEOUT_MS', DEFAULT_AGENT.timeout, 150000),
+    timeout: readPositiveInteger(env, 'AGENT_TIMEOUT_MS', DEFAULT_AGENT.timeout, 600000),
     maxConcurrent: readPositiveInteger(env, 'AGENT_MAX_CONCURRENT', DEFAULT_AGENT.maxConcurrent, 8),
     requestsPerMinute: readPositiveInteger(env, 'AGENT_REQUESTS_PER_MINUTE', DEFAULT_AGENT.requestsPerMinute, 120),
     playerCooldown: readPositiveInteger(env, 'AGENT_PLAYER_COOLDOWN_MS', DEFAULT_AGENT.playerCooldown, 60000)

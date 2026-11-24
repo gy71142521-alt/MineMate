@@ -23,7 +23,8 @@ VALIDATION_CODES = {"INVALID_TOOL_CALL", "LLM_INVALID_INTENT", "LLM_INVALID_RESP
 class MessageHandler:
     """单进程内有界准入，不排队，不持有游戏控制接口或对话记忆。"""
 
-    def __init__(self, settings: Settings, llm: LLMClient, clock=time.monotonic, tool_loop=None):
+    def __init__(self, settings: Settings, llm: LLMClient, clock=time.monotonic,
+                 tool_loop=None, runtime=None):
         self.settings = settings
         self.llm = llm
         self.clock = clock
@@ -33,6 +34,7 @@ class MessageHandler:
         self.players: dict[str, float] = {}
         self.active_players: set[str] = set()
         self.tool_loop = tool_loop
+        self.runtime = runtime
 
     async def handle(self, request: MessageRequest) -> dict:
         now = self.clock()
@@ -61,9 +63,10 @@ class MessageHandler:
                         request.player, len(request.message), config.tool_calling_enabled)
             try:
                 if config.tool_calling_enabled:
-                    if self.tool_loop is None:
+                    worker = self.runtime or self.tool_loop
+                    if worker is None:
                         raise LLMError(503, "TOOLS_NOT_CONFIGURED", "工具调用模块尚未就绪。")
-                    return await self.tool_loop.run(request)
+                    return await worker.run(request)
                 text = await self.llm.complete(request.player, request.message)
                 try:
                     result = parse_intent(text).model_dump()

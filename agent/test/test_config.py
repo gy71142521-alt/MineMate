@@ -38,6 +38,21 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_settings({name: value})
 
+    def test_task_runtime_configuration_is_bounded(self):
+        settings = load_settings({})
+        self.assertEqual(settings.execution_mode, "planned")
+        self.assertTrue(settings.task_planner_enabled)
+        self.assertEqual(settings.task_max_steps, 12)
+        self.assertEqual(settings.task_timeout, 120)
+        self.assertEqual(load_settings({"AGENT_EXECUTION_MODE": "legacy"}).execution_mode, "legacy")
+        for name, value in [("AGENT_EXECUTION_MODE", "other"), ("TASK_PLANNER_ENABLED", "maybe"),
+                            ("TASK_MAX_STEPS", "0"), ("TASK_MAX_TOOL_CALLS", "65"),
+                            ("TASK_TIMEOUT", "0"), ("TASK_MAX_CONSECUTIVE_ERRORS", "0"),
+                            ("TASK_MAX_SAME_ERROR", "0"), ("TASK_MAX_REPLANS", "11"),
+                            ("TASK_MAX_TEXT_ONLY", "0")]:
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                load_settings({name: value})
+
     def test_memory_configuration_is_bounded(self):
         settings = load_settings({})
         self.assertTrue(settings.memory_enabled)

@@ -36,6 +36,15 @@ class Settings:
     memory_max_tool_result_chars: int = 4000
     memory_session_idle_days: float = 30
     memory_auto_compact: bool = True
+    execution_mode: str = "planned"
+    task_planner_enabled: bool = True
+    task_max_steps: int = 12
+    task_max_tool_calls: int = 24
+    task_timeout: float = 120
+    task_max_consecutive_errors: int = 3
+    task_max_same_error: int = 2
+    task_max_replans: int = 3
+    task_max_text_only: int = 2
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -89,6 +98,12 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     auto_compact = values.get("MEMORY_AUTO_COMPACT", "true").strip().lower()
     if auto_compact not in ("true", "false"):
         raise ValueError("MEMORY_AUTO_COMPACT 必须为 true 或 false。")
+    execution_mode = values.get("AGENT_EXECUTION_MODE", "planned").strip().lower()
+    if execution_mode not in ("planned", "legacy"):
+        raise ValueError("AGENT_EXECUTION_MODE 必须为 planned 或 legacy。")
+    planner_enabled = values.get("TASK_PLANNER_ENABLED", "true").strip().lower()
+    if planner_enabled not in ("true", "false"):
+        raise ValueError("TASK_PLANNER_ENABLED 必须为 true 或 false。")
     default_memory_db = str(Path(__file__).resolve().parents[2] / "data" / "minemate-memory.sqlite3")
     memory_db_path = values.get("MEMORY_DB_PATH", "").strip() or default_memory_db
     if not memory_db_path or "\x00" in memory_db_path:
@@ -140,4 +155,13 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         memory_max_tool_result_chars=bounded_int_range("MEMORY_MAX_TOOL_RESULT_CHARS", 4000, 256, 32000),
         memory_session_idle_days=bounded_non_negative("MEMORY_SESSION_IDLE_DAYS", 30, 3650),
         memory_auto_compact=auto_compact == "true",
+        execution_mode=execution_mode,
+        task_planner_enabled=planner_enabled == "true",
+        task_max_steps=bounded_int_range("TASK_MAX_STEPS", 12, 1, 32),
+        task_max_tool_calls=bounded_int_range("TASK_MAX_TOOL_CALLS", 24, 1, 64),
+        task_timeout=bounded_number("TASK_TIMEOUT", 120, 600),
+        task_max_consecutive_errors=bounded_int_range("TASK_MAX_CONSECUTIVE_ERRORS", 3, 1, 10),
+        task_max_same_error=bounded_int_range("TASK_MAX_SAME_ERROR", 2, 1, 5),
+        task_max_replans=bounded_int_range("TASK_MAX_REPLANS", 3, 1, 10),
+        task_max_text_only=bounded_int_range("TASK_MAX_TEXT_ONLY", 2, 1, 5),
     )

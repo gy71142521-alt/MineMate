@@ -83,6 +83,33 @@ class LLMClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("unit-test-secret", str(error.exception))
             self.assertEqual(len(calls), 1)
 
+    async def test_plan_request_is_json_without_tools(self):
+        calls = []
+
+        def respond(request):
+            calls.append(request)
+            return httpx.Response(200, json={"choices": [{
+                "message": {"content": "{\"mode\":\"direct\",\"reason\":\"simple\"}"},
+                "finish_reason": "stop",
+            }]})
+
+        result = await LLMClient(llm_settings(), httpx.MockTransport(respond)).plan(
+            [{"role": "user", "content": "hi"}], [], system_prompt="planner")
+        self.assertEqual(result["mode"], "direct")
+        payload = json.loads(calls[0].content)
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["messages"][0]["content"], "planner")
+        self.assertNotIn("tools", payload)
+
+    async def test_invalid_plan_response_is_rejected(self):
+        with self.assertRaises(LLMError) as error:
+            await LLMClient(llm_settings(), httpx.MockTransport(
+                lambda _: httpx.Response(200, json={"choices": [{
+                    "message": {"content": "not json"}, "finish_reason": "stop",
+                }]})
+            )).plan([], [], system_prompt="planner")
+        self.assertEqual(error.exception.code, "LLM_INVALID_PLAN")
+
     async def test_provider_error_body_is_logged_redacted(self):
         def respond(_):
             return httpx.Response(400, text="model does not support tools; key=unit-test-secret")

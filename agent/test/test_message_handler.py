@@ -81,6 +81,17 @@ class MessageHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handler.active, 0)
         self.assertEqual(llm.complete.await_count, 1)
 
+    async def test_runtime_is_used_instead_of_legacy_loop(self):
+        runtime = AsyncMock()
+        runtime.run.return_value = {"intent": "conversation", "arguments": {}, "reply": "runtime"}
+        handler = MessageHandler(
+            replace(load_settings({}), tool_calling_enabled=True),
+            AsyncMock(), runtime=runtime,
+        )
+        result = await handler.handle(MessageRequest(player="Steve", message="hi"))
+        self.assertEqual(result["reply"], "runtime")
+        runtime.run.assert_awaited_once()
+
     async def test_same_player_cannot_run_two_turns_concurrently(self):
         handler, llm = self.handler(output(), llm_max_concurrent=2)
         started, release = asyncio.Event(), asyncio.Event()

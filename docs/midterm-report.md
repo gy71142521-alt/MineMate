@@ -12,21 +12,21 @@ MineMate 是一个 Minecraft Java Edition AI 玩伴。玩家在游戏聊天框�
 当前已经完成：
 
 - **双进程架构**：Node.js + Mineflayer 唯一负责游戏连接和操作；Python + FastAPI 负责 LLM、Agent Loop、记忆和校验。
-- **Agent Loop 已跑通**：function tools → 校验 → Node 执行 → 真实结果回填 → 继续或停止；支持多工具串行、预算、终态、取消和超时。
+- **任务执行运行时已跑通**：Planner 判断直接/规划 → Executor 调用工具 → 真实结果回填 → 失败可调整计划 → 模型用 `finish_task` 结束；Harness 只做步数/调用/超时/重复错误兜底。
 - **39 个游戏工具**：感知、移动、挖掘、建造、背包、战斗、方块交互、合成/熔炼。
 - **4 个确定性 Skill**：`explore_and_find`、`gather_resource`、`craft_item`、`smelt_item`。
 - **事件溯源式记忆**：按玩家持久化会话，消息历史从事件日志派生，上下文超限时压缩旧轮次，SQLite 重启可继续。
-- **Planning 执行底座**：显式步骤、Schema/引用校验、租约、串行执行、账本、导航/熔炼续接和背包验证。
+- **Planning 与执行底座**：Planner 生成结果导向步骤；显式任务仍支持 Schema/引用校验、租约、串行执行、账本、导航/熔炼续接和背包验证。
 - **安全与可观测性**：修改互斥、停止优先、`pending/uncertain` 不报成功、请求 ID 和阶段日志。
 
 本轮复跑：
 
-- Python：**278/278 通过**
+- Python：**299/299 通过**
 - Node：**180/180 通过**
 
 主要缺口：
 
-- 还没有 LLM 自主 Planner/Replanner；复杂目标仍主要依靠单个 Agent Loop 或显式 Skill。
+- Planner/Replanner 已接入单轮任务，但计划不持久化、没有 DAG/子任务依赖；跨轮复杂任务仍依赖对话历史。
 - Skill 还没有接入自然语言自动选择，目前通过 HTTP/测试脚本调用。
 - 记忆只在 Tool Calling 路径生效；长期事实主要靠压缩摘要。
 - 真实 Minecraft 全流程验收需要按仓库清单现场执行；自动化结果不等同于真实游戏验收。
@@ -84,7 +84,8 @@ MineMate 是一个 Minecraft Java Edition AI 玩伴。玩家在游戏聊天框�
 | 多步任务 | 单请求内有界循环，多工具串行 | 已实现（有界） |
 | 复杂确定性任务 | 4 个 Skill | 已实现 |
 | 记忆与上下文 | 事件日志、压缩、SQLite、按玩家隔离 | 已实现（Tool Calling） |
-| Planning | 显式步骤执行、租约、账本、验证 | 执行底座已实现，LLM Planner 未接入 |
+| Planning | Planner 生成步骤、Executor 执行、失败 update_plan | 已实现（单轮） |
+| 显式后台任务 | 步骤执行、租约、账本、验证 | 执行底座已实现 |
 | 安全/可观测性 | 权限、互斥、停止优先、状态语义、日志 | 已实现 |
 
 ### 1.5 系统架构
@@ -105,7 +106,7 @@ MineMate 是一个 Minecraft Java Edition AI 玩伴。玩家在游戏聊天框�
 ┌──────────────────────────────────────┐
 │ Python / FastAPI Agent               │
 │  - MessageHandler：限流、每玩家串行   │
-│  - ToolLoop：LLM ↔ 工具结果           │
+│  - AgentRuntime：Planner + 工具执行   │
 │  - MemoryManager：事件日志、压缩      │
 │  - SkillManager：确定性多步任务       │
 │  - TaskManager：显式步骤后台执行      │
@@ -146,28 +147,28 @@ MineMate 是一个 Minecraft Java Edition AI 玩伴。玩家在游戏聊天框�
 ```text
 Node 聊天 → Python /api/agent/message
   → MessageHandler：限流、并发、每玩家一个 turn
-  → ToolLoop：
-      1. 获取工具目录 + 世界快照
-      2. 从记忆会话派生 system + 历史 + 当前消息
-      3. 循环：
-           LLM(function tools)
-             ├─ 无 tool_calls → 最终回复
-             └─ 有 tool_calls（1–8 个）
-                  整批校验格式/JSON/注册/Schema/重复
-                  写入 assistant(tool_calls)
-                  按顺序调用 Node 工具
-                  结果写回 role=tool
-                  pending/失败/uncertain/stop → 停止同批剩余
-      4. 最终回复写回记忆，关闭 turn
+  → AgentRuntime：
+      1. 获取工具目录 + 世界快照，派生记忆上下文
+      2. Planner 判断：direct / plan
+           simple → 直接执行
+           complex → 2–8 个结果导向步骤
+      3. Executor 循环：
+           LLM(function tools + finish_task + update_plan)
+             ├─ finish_task → 模型宣布结束
+             ├─ update_plan → 替换剩余步骤
+             └─ 普通工具（1–8 个）→ 校验 → Node 执行
+                  错误/pending/uncertain → role=tool 回填，继续
+      4. Harness：步数/调用/超时/连续错误/重复失败兜底
 ```
 
 关键规则：
 
 - 模型只选择工具，不直接操作游戏；Python 校验/转发，Node 执行。
 - 一次响应 1–8 个调用，串行执行；超过 8 个整批拒绝。
-- 默认最多执行 4 次工具，总循环时限默认 90 秒。
-- `pending`、失败、`uncertain` 终止本轮，不自动重试副作用。
-- 模型说“完成”不算数，程序根据真实结果覆盖回复；未确认不报成功。
+- 默认最多 12 个 LLM 步、24 次 Node 工具调用、120 秒总时限。
+- 工具失败、`pending`、`uncertain` 不终止任务，模型根据真实结果决定重试/换工具/改计划。
+- 任务结束必须调用 `finish_task`；普通文本不会自动结束。
+- 重复失败/连续错误/超限由 Harness 兜底，返回诚实的不完整结果，不无限循环。
 - 客户端断开、超时、停止会请求 Node 取消。
 - 同一玩家同时只允许一个 turn，避免记忆出现两个 open turn。
 
@@ -211,7 +212,7 @@ Node 聊天 → Python /api/agent/message
 - `execute()` 不是成功凭证，`verify()` 用执行前后快照独立核验；
 - 失败/不确定不标 `completed`。
 
-当前限制：Skill 尚未接入自然语言自动选择；`gather_resource`、`craft_item` 等通过 HTTP/脚本调用。自然语言任务仍由 Tool Loop 组合工具完成。
+当前限制：Skill 尚未接入自然语言自动选择；`gather_resource`、`craft_item` 等通过 HTTP/脚本调用。自然语言任务由 `AgentRuntime` 的 Planner + Executor 组合工具完成。
 
 ### 2.5 记忆与上下文
 
@@ -235,17 +236,13 @@ GET  /api/agent/memory/{player}
 POST /api/agent/memory/{player}/reset
 ```
 
-### 2.6 Planning 前置执行底座
+### 2.6 Planning：Planner + 显式后台执行
 
-已实现“执行显式计划”的基础，但还没有让 LLM 自动生成计划：
-
-- 后台串行执行最多 24 步；
-- 步骤顺序即依赖关系，不是 DAG；
-- 前序结果引用只允许 `$ref: {step, path}`，替换后重新按 Node Schema 校验；
-- Node 整任务租约、心跳、旧实例/租约隔离；
-- 执行账本、请求回执；不确定时查询原请求，不盲目重发副作用；
-- `goto_position` pending 查原 taskId；`smelt_item(start)` 有界 status/take；
-- 显式背包数量/增量验证；没有验证条件返回 `finished_unverified`。
+- `AgentRuntime` 内的 Planner 先判断 direct/plan；复杂目标生成结果导向步骤，执行中可用 `update_plan` 修改；
+- 计划和工具结果都在同一 turn 内，由 Executor 逐步推进；
+- 显式后台 `/api/agent/tasks` 仍负责调用方提供的步骤：最多 24 步、顺序依赖、`$ref` 引用、租约/心跳、账本和背包验证；
+- 两条路径共享 Node 工具与验证语义，但 Planner 不会自动把计划提交到 TaskManager；
+- 计划当前不持久化为 memory 事件，也没有 DAG/子任务依赖。
 
 ### 2.7 安全、可观测性与回复体验
 
@@ -261,7 +258,7 @@ POST /api/agent/memory/{player}/reset
 本轮复跑：
 
 ```text
-Python: 278 tests, OK
+Python: 299 tests, OK
 Node:   180 tests, 180 pass
 ```
 
@@ -333,7 +330,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-gather-skill.
 
 **P0：主链路**
 
-1. **LLM Planner / Replanner**：模型生成显式步骤，提交现有 `/api/agent/tasks`；失败基于真实结果重规划。
+1. **Planner 深化**：计划持久化到会话、DAG/子任务依赖、跨轮继续；把规划结果接入 `/api/agent/tasks` 的统一执行入口。
 2. **Skill 自然语言路由**：把 4 个 Skill 作为受控能力暴露给模型；歧义先澄清。
 3. **真实 Minecraft 验收**：移动、挖掘/拾取、合成、熔炼、容器、攻击、停止/取消、死亡/断线。
 
@@ -349,14 +346,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-gather-skill.
 | --- | --- | --- |
 | Agent 架构 | 基本合理 | Node 唯一游戏控制、Python 唯一 LLM 编排、HTTP 边界、Schema 单一来源 |
 | 技术选型 | 有依据 | Mineflayer、FastAPI/Pydantic、OpenAI 兼容 function tools、SQLite |
-| 核心 Loop | 跑通 | 278 Python / 180 Node；自然语言多工具可演示 |
+| 核心 Runtime | 跑通 | 299 Python / 180 Node；direct/plan/错误回填/finish 均有测试 |
 | 工具调用 | 有效、有界 | 39 工具；校验、互斥、超时、取消、真实结果回填 |
 | 记忆 | 有效（Tool Calling） | 事件日志 + 压缩 + SQLite；两轮对话可引用上一轮 |
-| 规划 | 部分 | 执行底座完成，LLM Planner 未接入 |
+| 规划 | 已接入（单轮） | Planner direct/plan、update_plan、finish；计划持久化/DAG 待做 |
 | Skill 自然语言选择 | 未完成 | 只能显式 HTTP/脚本调用 |
 | 真实游戏验收 | 待完成 | 自动化/Mock 不等同于 Minecraft；演示前需现场跑 |
 
-总体判断：MineMate 已经具备**Agent 主循环、统一工具层、4 个确定性 Skill、事件溯源记忆和 Planning 执行底座**，不是单次工具调用 Demo。下一阶段重点是 **Planner/Replanning、自然语言 Skill 路由和真实游戏验收**。
+总体判断：MineMate 已经具备**Planner + Executor 任务运行时、统一工具层、4 个确定性 Skill、事件溯源记忆和显式后台执行底座**，不是单次工具调用 Demo。下一阶段重点是 **计划持久化/DAG、自然语言 Skill 路由和真实游戏验收**。
 
 ---
 
