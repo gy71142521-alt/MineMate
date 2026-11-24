@@ -248,6 +248,17 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages[1]["content"], "我叫 Alice")
         self.assertEqual(messages[2]["content"], "你好 Alice")
 
+    async def test_mid_turn_steering_is_recorded_as_user_message(self):
+        manager = await self.manager()
+        first = await manager.begin_turn("Steve", "先去挖石头")
+        await manager.record_user(first, "先停一下")
+        await manager.end_turn(first, "cancelled")
+        second = await manager.begin_turn("Steve", "继续")
+        messages = await manager.build_context(second, "SYS", {}, [])
+        await manager.end_turn(second, "cancelled")
+        users = [message["content"] for message in messages if message["role"] == "user"]
+        self.assertIn("先停一下", users)
+
     async def test_players_are_isolated(self):
         manager = await self.manager()
         first = await manager.begin_turn("Steve", "Steve 的秘密")

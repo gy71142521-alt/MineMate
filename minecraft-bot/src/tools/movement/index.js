@@ -207,7 +207,7 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
     if (distance(bot.entity.position, entity.position) > options.maxDistance) {
       return result(false, 'out_of_range', `玩家超出本次跟随范围（${options.maxDistance} 格），请先靠近 Bot。`, username);
     }
-    return start(username, 'follow', new GoalFollow(entity, LIMITS.followRange), { entity }, `正在跟随 ${username}，保持约 3 格距离。`);
+    return start(username, 'follow', new GoalFollow(entity, LIMITS.followRange), { entity }, "好，我跟着你。");
   }
 
   function goTo(username, x, y, z, navigation = {}) {
@@ -234,7 +234,7 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
     if (distance(bot.entity.position, target) > options.maxDistance) {
       return result(false, 'out_of_range', `目标超出本次导航范围（${options.maxDistance} 格），请缩短距离或调整 PATHFINDER_MAX_DISTANCE。`, username);
     }
-    return start(username, 'goto', new GoalNear(target.x, target.y, target.z, arrivalRange), { target }, `正在前往 ${target.x} ${target.y} ${target.z} 附近。`);
+    return start(username, 'goto', new GoalNear(target.x, target.y, target.z, arrivalRange), { target }, "好，我过去。");
   }
 
   function stop(username) {
@@ -285,7 +285,7 @@ function createMovementController(bot, { ownerUsername = '', pathfinding = {}, l
   function onGoalReached(goal) {
     if (!task || task.type !== 'goto' || task.goal !== goal) return;
     const { x, y, z } = task.target;
-    finishAfterEvent(task, true, 'arrived', `已到达 ${x} ${y} ${z} 附近。`);
+    finishAfterEvent(task, true, 'arrived', "到了。");
   }
 
   function onGoalUpdated(goal) {

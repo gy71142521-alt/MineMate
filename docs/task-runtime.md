@@ -90,15 +90,16 @@ Skill 目录和后台 `TaskManager` 未改动。
 - 只有 `finish_task` 是正常结束路径；普通文字不会自动结束；
 - 模型只输出文字时，Harness 会提示“如果结束请调用 finish_task”；
 - 连续两次只输出文字仍未结束时，Harness 兜底结束；
-- Harness 兜底只产生“先到这儿/任务还没完全结束”之类的诚实回复，不把未完成说成完成；
-- 模型决定 `completed` 后，Harness 不额外做目标验证；真实工具结果仍由模型在 summary 中负责核对。
+- Harness 兜底只产生“我先停一下，还没弄完”之类的诚实回复，不把未完成说成完成；
+- 模型决定 `completed` 后，Harness 不额外做目标验证；真实工具结果仍由模型在 summary 中负责核对；
+- 若模型在 `finish_task` 前已经写了自然语言回复，`completed` 时优先用那句，避免再用工具 summary 覆盖成状态播报；`partial/blocked` 仍用显式 summary，防止把未完成说成完成。
 
 ## 6. 兜底与质量属性
 
 | 兜底 | 默认 | 作用 |
 | --- | ---: | --- |
-| `TASK_MAX_STEPS` | 12 | 模型调用轮数上限 |
-| `TASK_MAX_TOOL_CALLS` | 24 | 实际 Node 工具调用上限 |
+| `TASK_MAX_STEPS` | 24 | 模型调用轮数上限 |
+| `TASK_MAX_TOOL_CALLS` | 32 | 实际 Node 工具调用上限 |
 | `TASK_TIMEOUT` | 120s | 整个任务硬超时 |
 | `TASK_MAX_CONSECUTIVE_ERRORS` | 3 | 连续失败提示/兜底 |
 | `TASK_MAX_SAME_ERROR` | 2 | 同一失败动作不无限重试 |
@@ -107,23 +108,49 @@ Skill 目录和后台 `TaskManager` 未改动。
 
 任一上限触发都会：取消正在执行的 Node 动作（若有）、关闭记忆 turn、返回明确的部分结果，不会无限循环。
 
+导航额外有任务级保护：`goto_position` 的 `NAVIGATION_FAILED` / `TARGET_OCCUPIED` 累计 3 次会提示模型停止重复，累计 5 次直接兜底结束；`arrival_range=0` 的目标脚部/头部被占用时 Node 直接拒绝，不再交给寻路器反复失败。
+
 Node 侧 `AGENT_TIMEOUT_MS` 默认已调整为 150000；如果它小于 `TASK_TIMEOUT`，Node 会先断开 HTTP，Agent 任务会被取消。修改超时后需要同时重启 Node/Python。
 
-## 7. 与记忆的关系
+## 7. 运行中插话（Steering）
+
+玩家在任务执行中发来的自然语言消息，不再一律返回 `PLAYER_BUSY`：
+
+```text
+Node 发现该玩家有活动 Agent 请求
+  → POST /api/agent/steer（短请求，不中止原请求）
+  → Runtime 把消息放入该玩家 next-step 队列
+  → 当前工具批次结算后、下一次模型调用前：
+      作为一条 user 消息插入当前 turn
+      写入记忆 user/message
+  → 模型看到“玩家插话”，自行决定停止、换目标或继续
+```
+
+边界和语义：
+
+- 插话只在**工具批次完成后**插入，不会打断正在执行的 Node 工具；
+- 不自动取消当前 turn，也不由 Harness 解析“停止/换目标”；由模型根据插话语义决定 `stop_movement` / `update_plan` / `finish_task`；
+- 每个 turn 最多排队 8 条；`POST /api/agent/steer` 返回 `{accepted:true|false}`；
+- 没有活动 turn 时 Node 回退到普通 `/api/agent/message`；
+- 插话写入当前 turn 的 `user/message`，因此下一轮记忆能看到；
+- 这是内存 inbox，不是跨重启持久队列；任务刚好结束时的竞态可能丢弃已排队插话；
+- 固定 `停止` 仍是最高优先级的旧指令路径：它会 abort 当前请求并停止移动，不等模型处理。
+
+## 8. 与记忆的关系
 
 - 任务使用原有 `MemoryManager`：begin turn、system prompt、历史上下文、tool call/result、finish 后的最终 assistant 都写入事件日志；
 - `update_plan` 和 `finish_task` 是 Python 控制工具，也在记忆里留下 tool call/result；
 - 计划本身目前是**单轮内**上下文，不单独持久化成 plan 事件；跨轮继续复杂任务仍依赖对话历史/摘要；
 - 记忆上下文不可用时回退到无记忆上下文，任务运行不被阻断。
 
-## 8. 路径选择与兼容
+## 9. 路径选择与兼容
 
 - `planned`：默认，使用 Planner + Executor + finish/update_plan + 兜底；
 - `legacy`：保留原 ToolLoop（失败即结束、单轮调用预算），用于回归或临时降级；
 - Skill `/api/agent/skills/execute` 和后台 `/api/agent/tasks` 完全不动；
 - Skill 的自然语言自动路由仍不在本轮范围。
 
-## 9. 测试
+## 10. 测试
 
 ```powershell
 cd agent

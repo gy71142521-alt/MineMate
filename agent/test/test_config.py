@@ -42,7 +42,7 @@ class ConfigTests(unittest.TestCase):
         settings = load_settings({})
         self.assertEqual(settings.execution_mode, "planned")
         self.assertTrue(settings.task_planner_enabled)
-        self.assertEqual(settings.task_max_steps, 12)
+        self.assertEqual(settings.task_max_steps, 24)
         self.assertEqual(settings.task_timeout, 120)
         self.assertEqual(load_settings({"AGENT_EXECUTION_MODE": "legacy"}).execution_mode, "legacy")
         for name, value in [("AGENT_EXECUTION_MODE", "other"), ("TASK_PLANNER_ENABLED", "maybe"),

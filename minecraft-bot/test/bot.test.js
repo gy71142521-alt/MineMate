@@ -209,17 +209,14 @@ test('错误坐标格式提示用法；非法数字交给移动工具校验', ()
   assert.equal(Number.isNaN(state.moveCalls[0][2]), true);
 });
 
-test('移动异步反馈只注册一次，断开后不再发送', () => {
+test('移动异步结果不直接发到聊天，只由 Agent 工具结果处理', () => {
   const state = setup();
   state.bot.emit('spawn');
   for (let i = 0; i < 10; i += 1) state.bot.emit('chat', 'Steve', '跟随我');
-  assert.equal(state.movement.listenerCount('result'), 1);
-  state.movement.emit('result', { message: '已到达目标附近' });
-  assert.equal(state.sent.at(-1), '已到达目标附近');
-  state.bot.emit('end', 'socketClosed');
   const count = state.sent.length;
   assert.equal(state.movement.listenerCount('result'), 0);
-  state.movement.emit('result', { message: '不应发送' });
+  state.movement.emit('result', { message: '已到达目标附近' });
+  assert.equal(state.movement.listenerCount('result'), 0);
   assert.equal(state.sent.length, count);
 });
 

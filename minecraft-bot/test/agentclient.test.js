@@ -141,3 +141,26 @@ test('真实 HTTP 响应体迟迟不结束时仍受总超时限制', async (t) =
   const result = await client.message('Steve', 'hi');
   assert.match(result.reply, /超时/);
 });
+
+test('运行中插话走 steer，不中止原请求；无活动 turn 时拒绝', async () => {
+  const calls = [];
+  let finishMessage;
+  const fetchImpl = async (url, options) => {
+    calls.push([url, JSON.parse(options.body)]);
+    if (url.endsWith('/api/agent/message')) {
+      return new Promise((resolve) => { finishMessage = () => resolve(response()); });
+    }
+    return new Response(JSON.stringify({ success: true, data: { accepted: true }, error: null }), { status: 200 });
+  };
+  const client = createAgentClient({}, { logger, fetchImpl });
+  const pending = client.message('Steve', '执行任务');
+  assert.equal(client.isActive('Steve'), true);
+  const steered = await client.steer('Steve', '先停一下');
+  assert.equal(steered.accepted, true);
+  assert.equal(calls.at(-1)[0], 'http://127.0.0.1:8000/api/agent/steer');
+  assert.deepEqual(calls.at(-1)[1], { player: 'Steve', message: '先停一下' });
+  finishMessage();
+  await pending;
+  assert.equal(client.isActive('Steve'), false);
+  assert.deepEqual(await client.steer('Steve', '再停一下'), { accepted: false });
+});

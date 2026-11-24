@@ -29,6 +29,22 @@ class AgentApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("我就", body["data"]["reply"])
         self.assertIsNone(body["error"])
 
+    async def test_steer_route_queues_without_starting_a_turn(self):
+        from dataclasses import replace
+        from unittest.mock import AsyncMock
+        from unittest.mock import Mock
+        runtime = AsyncMock()
+        runtime.steer = Mock(return_value=True)
+        handler = MessageHandler(replace(llm_settings(), tool_calling_enabled=True),
+                                 AsyncMock(), runtime=runtime)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
+            with patch.object(main, "message_handler", handler):
+                response = await client.post("/api/agent/steer", json={"player": "Steve", "message": "先停一下"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"], {"accepted": True})
+        runtime.steer.assert_called_once_with("Steve", "先停一下", None)
+        runtime.run.assert_not_awaited()
+
     async def test_invalid_input_and_invalid_model_json(self):
         settings = llm_settings()
         calls = []

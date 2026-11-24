@@ -113,13 +113,8 @@ function registerChatEvents(bot, logger = console, movement, perception, agent) 
   bot.on('death', () => { generation += 1; });
   bot.on('respawn', () => { generation += 1; });
 
-  // 异步到达/失败统一反馈，监听器在注册聊天时添加一次，不随指令累积。
-  function onMovementResult(result) {
-    if (ready) send(result.message);
-  }
-  movement?.on('result', onMovementResult);
-  bot.once('end', () => movement?.removeListener('result', onMovementResult));
-
+  // 移动任务的异步结果由 Agent 工具结果统一处理；这里不向聊天发送内部状态，
+  // 避免“已到达 x y z 附近”这类调试信息混进玩家可见回复。
   bot.on('chat', (username, message) => {
     if (username === bot.username) return;
 
@@ -179,8 +174,18 @@ function registerChatEvents(bot, logger = console, movement, perception, agent) 
       const currentGeneration = generation;
       const toolGeneration = bot.tools?.getState().generation;
       const requestArguments = Number.isInteger(toolGeneration) ? [username, command, { generation: toolGeneration }] : [username, command];
+      // 运行中的任务优先接收插话；steer 只写入当前 turn 的下一步，
+      // 原请求的最终回复仍会由原调用链发送。没有活动任务时走普通消息。
+      const deliver = async () => {
+        if (!ready || currentGeneration !== generation) return null;
+        if (agent.isActive?.(username)) {
+          const steered = await agent.steer?.(username, command);
+          if (steered?.accepted) return null;
+        }
+        return agent.message(...requestArguments);
+      };
       // 不等待网络；旧指令不会进入此分支，返回 intent 也不会传给移动模块。
-      Promise.resolve().then(() => ready && currentGeneration === generation ? agent.message(...requestArguments) : null).then((result) => {
+      Promise.resolve().then(deliver).then((result) => {
         if (ready && currentGeneration === generation && result?.reply) send(result.reply);
       }).catch(() => {
         logger.error('[Agent] 聊天处理失败。');

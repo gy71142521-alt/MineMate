@@ -25,6 +25,7 @@ function setup(t, { ownerUsername = '', pathfinding, realPlugin = false, spawn =
   };
   bot.getControlState = (key) => bot.controlState[key];
   bot.clearControlStates = () => { calls.push(['clear']); Object.keys(bot.controlState).forEach((key) => { bot.controlState[key] = false; }); };
+  bot.blockAt = (position) => ({ name: 'air', position: position.clone(), boundingBox: 'empty', hardness: 0, canHarvest: () => true });
   bot.loadPlugin = (plugin) => {
     calls.push(['loadPlugin', plugin]);
     if (realPlugin) {
@@ -186,7 +187,7 @@ test('坐标使用 GoalNear 和向下取整；到达后只反馈一次', async (
   assert.equal(movement.getState().type, 'idle');
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].status, 'arrived');
-  assert.match(notifications[0].message, /-13 65 20/);
+  assert.equal(notifications[0].message, '到了。');
 });
 
 test('每项任务有唯一 taskId，旧任务迟到的结果不会改变或误报新任务', async (t) => {

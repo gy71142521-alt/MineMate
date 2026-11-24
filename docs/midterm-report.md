@@ -1,7 +1,7 @@
 # MineMate 中期汇报说明文档
 
 > **Lab B（智能体软件）**  
-> 版本：2026-11-23  
+> 版本：2026-11-24  
 > 性质：阶段性说明文档，不是提交稿，也不是中期答辩演讲稿。  
 > 说明：侧重已经实现、可以验证的功能；未完成的能力和真实游戏验收状态会单独标注。
 
@@ -13,6 +13,7 @@ MineMate 是一个 Minecraft Java Edition AI 玩伴。玩家在游戏聊天框�
 
 - **双进程架构**：Node.js + Mineflayer 唯一负责游戏连接和操作；Python + FastAPI 负责 LLM、Agent Loop、记忆和校验。
 - **任务执行运行时已跑通**：Planner 判断直接/规划 → Executor 调用工具 → 真实结果回填 → 失败可调整计划 → 模型用 `finish_task` 结束；Harness 只做步数/调用/超时/重复错误兜底。
+- **运行中插话**：自然语言通过 `POST /api/agent/steer` 在当前工具批次结束后插入 `user` 上下文，由模型决定停止、换目标或继续。
 - **39 个游戏工具**：感知、移动、挖掘、建造、背包、战斗、方块交互、合成/熔炼。
 - **4 个确定性 Skill**：`explore_and_find`、`gather_resource`、`craft_item`、`smelt_item`。
 - **事件溯源式记忆**：按玩家持久化会话，消息历史从事件日志派生，上下文超限时压缩旧轮次，SQLite 重启可继续。
@@ -21,8 +22,8 @@ MineMate 是一个 Minecraft Java Edition AI 玩伴。玩家在游戏聊天框�
 
 本轮复跑：
 
-- Python：**299/299 通过**
-- Node：**180/180 通过**
+- Python：**308/308 通过**
+- Node：**182/182 通过**
 
 主要缺口：
 
@@ -153,24 +154,26 @@ Node 聊天 → Python /api/agent/message
            simple → 直接执行
            complex → 2–8 个结果导向步骤
       3. Executor 循环：
+           每步开始前消费 next-step 玩家插话（user 上下文）
            LLM(function tools + finish_task + update_plan)
              ├─ finish_task → 模型宣布结束
              ├─ update_plan → 替换剩余步骤
              └─ 普通工具（1–8 个）→ 校验 → Node 执行
                   错误/pending/uncertain → role=tool 回填，继续
-      4. Harness：步数/调用/超时/连续错误/重复失败兜底
+      4. Harness：步数/调用/超时/连续错误/重复失败/导航失败兜底
 ```
 
 关键规则：
 
 - 模型只选择工具，不直接操作游戏；Python 校验/转发，Node 执行。
 - 一次响应 1–8 个调用，串行执行；超过 8 个整批拒绝。
-- 默认最多 12 个 LLM 步、24 次 Node 工具调用、120 秒总时限。
+- 默认最多 24 个 LLM 步、32 次 Node 工具调用、120 秒总时限。
 - 工具失败、`pending`、`uncertain` 不终止任务，模型根据真实结果决定重试/换工具/改计划。
 - 任务结束必须调用 `finish_task`；普通文本不会自动结束。
 - 重复失败/连续错误/超限由 Harness 兜底，返回诚实的不完整结果，不无限循环。
 - 客户端断开、超时、停止会请求 Node 取消。
 - 同一玩家同时只允许一个 turn，避免记忆出现两个 open turn。
+- 运行中的自然语言消息通过 `POST /api/agent/steer` 在工具批次结束后插入当前 turn；模型自行理解停止/换目标/继续。
 
 ### 2.3 工具层：39 个工具
 
@@ -251,21 +254,22 @@ POST /api/agent/memory/{player}/reset
 - `pending/uncertain` 不报告完成；程序覆盖虚假成功；
 - 挖掘保护方块/脚下支撑；攻击白名单；放置不覆盖/不碰撞；
 - 日志带 `rid`、阶段、错误码、耗时；`LOG_TRACEBACK` 可控制堆栈级别；
-- Agent 回复采用玩家口吻，不主动报坐标、工具名、状态码；即使模型输出坐标，也会在回复层过滤。
+- Agent 回复采用玩家口吻，不主动报坐标、工具名、状态码；即使模型输出坐标，也会在回复层过滤；
+- Node 移动结果不再直接发聊天；`goto_position(arrival_range=0)` 拒绝实心脚部/头部，连续导航失败有任务级预算。
 
 ### 2.8 测试与验证
 
 本轮复跑：
 
 ```text
-Python: 299 tests, OK
-Node:   180 tests, 180 pass
+Python: 308 tests, OK
+Node:   182 tests, 182 pass
 ```
 
 覆盖：
 
 - Node：工具注册/Schema、移动、感知、挖掘、建造、背包、战斗、交互、合成/熔炼子工具、权限、互斥、超时/取消、HTTP、租约/回执。
-- Python：Agent HTTP、LLM 客户端、Tool Loop、工具目录、执行器、4 个 Skill、记忆事件/压缩/SQLite/按玩家隔离、回复风格、日志脱敏、启动器、配置。
+- Python：Agent HTTP、LLM 客户端、AgentRuntime（含 steering/兜底）、工具目录、执行器、4 个 Skill、记忆事件/压缩/SQLite/按玩家隔离、回复风格、日志脱敏、启动器、配置。
 - 跨语言：Python 通过真实 Node HTTP/目录做契约测试，不只测 Python mock。
 
 真实环境：本轮没有重新连接真实 Minecraft 或付费模型做全流程验收；仓库有游戏验收清单，演示前需现场跑一遍。
@@ -346,7 +350,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-gather-skill.
 | --- | --- | --- |
 | Agent 架构 | 基本合理 | Node 唯一游戏控制、Python 唯一 LLM 编排、HTTP 边界、Schema 单一来源 |
 | 技术选型 | 有依据 | Mineflayer、FastAPI/Pydantic、OpenAI 兼容 function tools、SQLite |
-| 核心 Runtime | 跑通 | 299 Python / 180 Node；direct/plan/错误回填/finish 均有测试 |
+| 核心 Runtime | 跑通 | 308 Python / 182 Node；direct/plan/错误回填/finish 均有测试 |
 | 工具调用 | 有效、有界 | 39 工具；校验、互斥、超时、取消、真实结果回填 |
 | 记忆 | 有效（Tool Calling） | 事件日志 + 压缩 + SQLite；两轮对话可引用上一轮 |
 | 规划 | 已接入（单轮） | Planner direct/plan、update_plan、finish；计划持久化/DAG 待做 |

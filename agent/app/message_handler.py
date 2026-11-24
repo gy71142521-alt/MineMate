@@ -36,6 +36,18 @@ class MessageHandler:
         self.tool_loop = tool_loop
         self.runtime = runtime
 
+    async def steer(self, request: MessageRequest) -> bool:
+        """Queue an in-flight instruction for the running runtime turn.
+
+        Steering intentionally bypasses message rate limiting and does not start
+        a new turn. It is accepted only while the same player has an active
+        planned runtime turn.
+        """
+        config = self.settings
+        if not config.tool_calling_enabled or self.runtime is None:
+            return False
+        return self.runtime.steer(request.player, request.message, request.generation)
+
     async def handle(self, request: MessageRequest) -> dict:
         now = self.clock()
         config = self.settings

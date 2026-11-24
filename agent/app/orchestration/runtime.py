@@ -44,6 +44,8 @@ class RuntimeState:
     replans: int = 0
     consecutive_errors: int = 0
     invalid_outputs: int = 0
+    navigation_failures: int = 0
+    navigation_nudged: bool = False
     error_counts: dict[tuple[str, str, str], int] = field(default_factory=dict)
     error_nudged: bool = False
     last_text: str | None = None
@@ -57,6 +59,10 @@ class AgentRuntime:
                  memory: MemoryManager | None = None, planner: Planner | None = None):
         self.settings, self.llm, self.client, self.memory = settings, llm, client, memory
         self.planner = planner or Planner(llm, enabled=settings.task_planner_enabled)
+        # Player -> generation of the currently running turn, and next-step
+        # steering messages. The dict is owned by this single runtime process.
+        self._active: dict[str, int | None] = {}
+        self._steering: dict[str, list[str]] = {}
 
     async def run(self, request: MessageRequest) -> dict:
         if not self.settings.llm_api_key or not self.settings.llm_model:
@@ -65,6 +71,8 @@ class AgentRuntime:
         state = RuntimeState()
         memory_turn: MemoryTurn | None = None
         memory_reason = "error"
+        player_key = request.player.lower()
+        self._active[player_key] = request.generation
         try:
             async with asyncio.timeout(self.settings.task_timeout):
                 catalog, generation = await self.client.catalog()
@@ -109,6 +117,9 @@ class AgentRuntime:
             )
             raise LLMError(502, "AGENT_ERROR", "任务执行失败，请稍后再试。") from error
         finally:
+            self._active.pop(player_key, None)
+            if self._steering.pop(player_key, None):
+                logger.warning("[Runtime] 任务结束时仍有未处理的玩家插话，已丢弃。")
             if memory_turn is not None and not memory_turn.closed:
                 await self._end_memory(memory_turn, memory_reason)
 
@@ -138,8 +149,11 @@ class AgentRuntime:
         max_steps = self.settings.task_max_steps
         for _ in range(max_steps):
             state.llm_steps += 1
+            await self._inject_steering(request, state, messages, memory_turn)
             if state.invalid_outputs >= 4:
                 return await self._fallback(request, state, memory_turn, "invalid_limit")
+            if state.navigation_failures >= 5:
+                return await self._fallback(request, state, memory_turn, "navigation_limit")
             if state.tool_calls >= self.settings.task_max_tool_calls:
                 return await self._fallback(request, state, memory_turn, "tool_limit")
             response = await self.llm.tool_completion(messages, tools, final=False)
@@ -175,6 +189,9 @@ class AgentRuntime:
                 continue
 
             state.text_only = 0
+            # A natural line only counts as the finish reply if no tool action
+            # happened after it; otherwise it may be an intermediate remark.
+            state.last_text = None
             try:
                 parsed = self._validate_calls(calls, catalog)
             except ToolOutputError as error:
@@ -215,6 +232,8 @@ class AgentRuntime:
                 return await self._fallback(request, state, memory_turn, "error_limit")
             if state.invalid_outputs >= 4:
                 return await self._fallback(request, state, memory_turn, "invalid_limit")
+            if state.navigation_failures >= 5:
+                return await self._fallback(request, state, memory_turn, "navigation_limit")
         return await self._fallback(request, state, memory_turn, "step_limit")
 
     def _validate_calls(self, calls: list, catalog: dict) -> list[tuple[ToolCall, str, dict, str]]:
@@ -284,6 +303,14 @@ class AgentRuntime:
             state.consecutive_errors += 1
             error = result.get("error") if isinstance(result.get("error"), dict) else {}
             code = str(error.get("code", "TOOL_FAILED"))
+            if name == "goto_position" and code in ("NAVIGATION_FAILED", "TARGET_OCCUPIED"):
+                state.navigation_failures += 1
+                if state.navigation_failures >= 3 and not state.navigation_nudged:
+                    state.navigation_nudged = True
+                    messages.append({
+                        "role": "user",
+                        "content": "[编排器提示] 导航连续失败。不要反复去同一个实心/不可达位置；先用 inspect_block 检查脚部和头部，换站位或结束。",
+                    })
             key = (name, fingerprint, code)
             state.error_counts[key] = state.error_counts.get(key, 0) + 1
             if state.consecutive_errors >= self.settings.task_max_consecutive_errors and not state.error_nudged:
@@ -302,6 +329,10 @@ class AgentRuntime:
 
     async def _finish(self, request: MessageRequest, state: RuntimeState, messages: list[dict],
                       memory_turn: MemoryTurn | None, call: ToolCall, arguments: dict) -> dict | None:
+        # A steering message that arrived while the tool batch was settling must
+        # be seen before the model closes the turn.
+        if await self._inject_steering(request, state, messages, memory_turn):
+            return None
         try:
             finish = FinishArgs.model_validate(arguments)
         except Exception:
@@ -314,7 +345,12 @@ class AgentRuntime:
             return None
         if state.pending:
             await self._cancel(state, request.player)
-        reply = redact(humanize_reply(finish.summary), self.settings.llm_api_key) or "好了。"
+        # The model often writes the natural player-facing line just before
+        # calling finish_task, then repeats a technical summary in the tool.
+        # For a completed task, prefer that last natural line; partial/blocked
+        # results keep the explicit summary so nothing is overstated.
+        source = state.last_text if finish.status == "completed" and state.last_text else finish.summary
+        reply = redact(humanize_reply(source), self.settings.llm_api_key) or "好了。"
         await self._record_assistant(memory_turn, None, [call.model_dump()])
         result = {"success": True, "tool": "finish_task",
                   "data": {"status": finish.status, "summary": finish.summary}, "error": None}
@@ -377,11 +413,11 @@ class AgentRuntime:
         elif state.last_text and not state.plan and state.tool_calls == 0 and state.consecutive_errors == 0:
             reply = state.last_text
         elif state.consecutive_errors > 0:
-            reply = "这次先到这儿，遇到点问题，任务还没完全做完。"
+            reply = "卡了一下，我先停停。"
         elif state.plan:
-            reply = "这次先到这儿，任务还没完全结束，剩下的步骤还得继续。"
+            reply = "还没弄完，我先停一下。"
         else:
-            reply = "这次先到这儿，任务还没完全结束。"
+            reply = "我先停一下，还没弄完。"
         reply = redact(humanize_reply(reply), self.settings.llm_api_key) or "这次先到这儿。"
         await self._record_assistant(memory_turn, reply, [])
         await self._end_memory(memory_turn, "limit")
@@ -393,6 +429,48 @@ class AgentRuntime:
     def _failure(tool: str, code: str, message: str) -> dict:
         return {"success": False, "tool": tool, "data": None,
                 "error": {"code": code, "message": message}}
+
+    def steer(self, player: str, message: str, generation: int | None = None) -> bool:
+        """Queue a mid-turn instruction for the next execution step.
+
+        Returns False when the player has no running turn (the caller should
+        fall back to a normal message) or when the generation is stale.
+        """
+        key = player.lower()
+        if key not in self._active:
+            return False
+        active_generation = self._active[key]
+        if generation is not None and active_generation is not None and generation != active_generation:
+            return False
+        queue = self._steering.setdefault(key, [])
+        if len(queue) >= 8:
+            return False
+        queue.append(message)
+        return True
+
+    def _take_steering(self, player: str) -> list[str]:
+        return self._steering.pop(player.lower(), [])
+
+    async def _inject_steering(self, request: MessageRequest, state: RuntimeState,
+                               messages: list[dict], memory_turn: MemoryTurn | None) -> bool:
+        pending = self._take_steering(request.player)
+        if not pending:
+            return False
+        for message in pending:
+            messages.append({"role": "user", "content": f"[玩家插话] {message}"})
+            await self._record_user(memory_turn, message)
+        state.text_only = 0
+        state.last_text = None
+        logger.info("[Runtime] 插入玩家插话 player=%s count=%d", request.player, len(pending))
+        return True
+
+    async def _record_user(self, turn: MemoryTurn | None, message: str) -> None:
+        if self.memory is None or turn is None:
+            return
+        try:
+            await self.memory.record_user(turn, message)
+        except Exception as error:
+            logger.warning("[Runtime] 记忆写入失败 label=user error=%s", type(error).__name__)
 
     async def _record_assistant(self, turn: MemoryTurn | None, content: str | None,
                                 tool_calls: list[dict] | None) -> None:

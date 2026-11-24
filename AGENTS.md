@@ -168,3 +168,4 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 - `update_plan` 只替换计划上下文，不直接执行工具；计划最多 8 步，修改次数受 `TASK_MAX_REPLANS` 限制。计划是单轮运行时上下文，当前不单独持久化为 memory 事件。
 - `finish_task`/`update_plan` 是 Python 控制工具，不进入 Node 注册表；Node 仍是游戏工具 Schema 唯一来源。Skill 目录和 `TaskManager` 不受该运行时改造影响。
 - Node 的 `AGENT_TIMEOUT_MS` 必须大于等于 Python `TASK_TIMEOUT`；修改超时需同时重启两端。新增控制工具/兜底策略必须补 `agent/test/test_runtime.py` 或对应测试。
+- 运行中插话通过 `POST /api/agent/steer` 进入当前 turn 的 next-step 队列，在工具批次结算后作为 `user/message` 插入；不得在工具执行中途插入，也不得由 Harness 解析“停止/换目标”。模型看到插话后自行选择 `stop_movement`/`update_plan`/`finish_task`；固定 `停止` 仍是优先 abort 的旧指令路径。插话写入当前 turn 记忆，但队列是单进程内存，不提供跨重启持久保证。

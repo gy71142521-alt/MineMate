@@ -254,6 +254,18 @@ async def agent_message(request: MessageRequest, http_request: Request) -> JSONR
         diagnostics.reset_request_id(token)
 
 
+@app.post("/api/agent/steer")
+async def agent_steer(request: MessageRequest) -> JSONResponse:
+    """Insert a player instruction into the next step of a running turn."""
+    token = diagnostics.set_request_id(uuid.uuid4().hex[:8])
+    try:
+        accepted = await message_handler.steer(request)
+        logger.info("[HTTP] /api/agent/steer player=%s accepted=%s", request.player, accepted)
+        return JSONResponse(status_code=200, content=success({"accepted": accepted}))
+    finally:
+        diagnostics.reset_request_id(token)
+
+
 @app.get("/api/game/world")
 async def world() -> JSONResponse:
     return await forward(lambda: client.request("GET", "/api/world"))

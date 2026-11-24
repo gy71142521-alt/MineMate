@@ -132,7 +132,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         llm.tool_completion.side_effect = slow
         result = await runtime.run(MessageRequest(player="Steve", message="执行"))
-        self.assertIn("先到这儿", result["reply"])
+        self.assertIn("先停", result["reply"])
 
     async def test_error_can_trigger_update_plan_then_finish(self):
         runtime, llm, client = self.runtime()
@@ -181,6 +181,25 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reply"], "这次成功了。")
         self.assertEqual(client.execute.await_count, 2)
 
+    async def test_finish_prefers_last_natural_reply_for_completed_tasks(self):
+        runtime, llm, _ = self.runtime()
+        llm.tool_completion.side_effect = [
+            {"content": "喏，木斧。"},
+            {"tool_calls": [finish_call("把木斧拿给玩家看，背包里还有 3 块木板。")]},
+        ]
+        result = await runtime.run(MessageRequest(player="Steve", message="我看看"))
+        self.assertEqual(result["reply"], "喏，木斧。")
+
+    async def test_intermediate_text_is_not_used_as_finish_reply(self):
+        runtime, llm, _ = self.runtime()
+        llm.tool_completion.side_effect = [
+            {"content": "我先看看。"},
+            {"tool_calls": [tool_call("demo")]},
+            {"tool_calls": [finish_call("木头挖好了。")]},
+        ]
+        result = await runtime.run(MessageRequest(player="Steve", message="执行"))
+        self.assertEqual(result["reply"], "木头挖好了。")
+
     async def test_invalid_finish_is_fed_back_and_can_be_corrected(self):
         runtime, llm, client = self.runtime()
         llm.tool_completion.side_effect = [
@@ -198,7 +217,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                                        "error": {"code": "NO_LINE_OF_SIGHT", "message": "看不见"}}
         llm.tool_completion.return_value = {"tool_calls": [tool_call("demo")]}
         result = await runtime.run(MessageRequest(player="Steve", message="执行"))
-        self.assertIn("先到这儿", result["reply"])
+        self.assertIn("先停", result["reply"])
         self.assertLessEqual(client.execute.await_count, 1)
 
     async def test_finish_closes_memory_turn(self):
@@ -212,6 +231,80 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         stats = await memory.stats("Steve")
         self.assertEqual(stats["turns"], 1)
         self.assertFalse(stats["degraded"])
+
+    async def test_steering_is_injected_at_the_next_step_boundary(self):
+        runtime, _, _ = self.runtime()
+
+        class SteerLLM:
+            def __init__(self):
+                self.calls = 0
+                self.seen = []
+
+            async def tool_completion(self, messages, tools, final=False):
+                self.calls += 1
+                self.seen.append(messages)
+                if self.calls == 1:
+                    self.runtime.steer("Steve", "换个目标，去做木镐")
+                    return {"tool_calls": [tool_call("demo")]}
+                return {"tool_calls": [finish_call("换成木镐了。")]}
+
+        fake = SteerLLM()
+        fake.runtime = runtime
+        runtime.llm = fake
+        result = await runtime.run(MessageRequest(player="Steve", message="去做石镐"))
+        self.assertEqual(result["reply"], "换成木镐了。")
+        self.assertTrue(any("[玩家插话]" in str(message.get("content", "")) for message in fake.seen[1]))
+
+    async def test_steering_before_finish_defers_finish_until_seen(self):
+        runtime, _, _ = self.runtime()
+
+        class SteerLLM:
+            def __init__(self):
+                self.calls = 0
+                self.seen = []
+
+            async def tool_completion(self, messages, tools, final=False):
+                self.calls += 1
+                self.seen.append(messages)
+                if self.calls == 1:
+                    self.runtime.steer("Steve", "先停一下")
+                    return {"tool_calls": [finish_call("旧任务完成。")]}
+                return {"tool_calls": [finish_call("好，先停了。", status="partial")]}
+
+        fake = SteerLLM()
+        fake.runtime = runtime
+        runtime.llm = fake
+        result = await runtime.run(MessageRequest(player="Steve", message="执行"))
+        self.assertEqual(result["reply"], "好，先停了。")
+        self.assertTrue(any("[玩家插话]" in str(message.get("content", "")) for message in fake.seen[1]))
+
+    async def test_steering_is_rejected_without_active_turn(self):
+        runtime, _, _ = self.runtime()
+        self.assertFalse(runtime.steer("Steve", "停下"))
+
+    async def test_repeated_navigation_failures_stop_the_loop(self):
+        settings = replace(load_settings({}), llm_api_key="unit-secret", llm_model="mock",
+                           tool_calling_enabled=True, task_timeout=5)
+        llm = AsyncMock()
+        client = AsyncMock()
+        client.catalog.return_value = ({"goto_position": {
+            "name": "goto_position", "description": "goto",
+            "parameters": {"type": "object", "properties": {"x": {"type": "integer", "minimum": 0, "maximum": 99}},
+                           "required": ["x"], "additionalProperties": False},
+        }}, 1)
+        client.request.return_value = {"player": {"health": 20}}
+        client.execute.return_value = {"success": False, "tool": "goto_position", "data": None,
+                                       "error": {"code": "NAVIGATION_FAILED", "message": "no path"}}
+        planner = AsyncMock()
+        planner.decide.return_value = PlanDecision(mode="direct", reason="simple")
+        llm.tool_completion.side_effect = [
+            {"tool_calls": [tool_call("goto_position", {"x": i}, identity=f"nav{i}")]}
+            for i in range(8)
+        ]
+        runtime = AgentRuntime(settings, llm, client, memory=None, planner=planner)
+        result = await runtime.run(MessageRequest(player="Steve", message="执行"))
+        self.assertIn("先停", result["reply"])
+        self.assertEqual(client.execute.await_count, 5)
 
     async def test_text_only_falls_back_to_reply(self):
         runtime, llm, _ = self.runtime(task_max_text_only=1)

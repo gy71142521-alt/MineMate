@@ -209,6 +209,14 @@ class MemoryManager:
             await self._persist(turn.session, [turn.session.events[-1]])
             return step
 
+    async def record_user(self, turn: MemoryTurn, message: str) -> None:
+        """Append a mid-turn user steering message to the event log."""
+        async with self._lock(turn.session.player):
+            if turn.closed:
+                return
+            turn.session.add_user(message)
+            await self._persist(turn.session, [turn.session.events[-1]])
+
     async def record_assistant(self, turn: MemoryTurn, content: str | None,
                                tool_calls: list[dict[str, Any]] | None = None,
                                usage: dict[str, Any] | None = None) -> None:

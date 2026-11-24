@@ -48,6 +48,14 @@ test('挖掘仅作用指定方块，验证真实空气及工具缺失、耐久�
   assert.equal((await f.run('mine_block', { block_name: 'stone', position })).error.code, 'NO_LINE_OF_SIGHT');
   assert.equal((await f.run('mine_block', { block_name: 'stone', position: { ...position, x: 100 } })).error.code, 'OUT_OF_RANGE');
 });
+test('精确站位导航拒绝实心脚部位置，避免反复 NAVIGATION_FAILED', async () => {
+  const f = fixture();
+  f.setBlock('dirt', new Vec3(1, 64, 0));
+  const result = await f.run('goto_position', { x: 1, y: 64, z: 0, arrival_range: 0 });
+  assert.equal(result.success, false);
+  assert.equal(result.error.code, 'TARGET_OCCUPIED');
+});
+
 test('挖掘 API 返回但方块未消失时只能反馈 uncertain', async () => {
   const f = fixture(); f.setBlock('stone'); f.bot.dig = async () => {};
   const result = await f.run('mine_block', { block_name: 'stone', position: { x: 1, y: 64, z: 0 } });

@@ -32,6 +32,16 @@ class PersonaTests(unittest.TestCase):
         self.assertEqual(humanize_reply("   "), "嗯，我在。")
         self.assertEqual(len(humanize_reply("说" * 900)), 500)
 
+    def test_common_status_printer_phrasing_is_rewritten(self):
+        self.assertEqual(
+            humanize_reply("用砍来的原木做了木板和木棍，在工作台上合成出 1 把木斧，已放进背包。"),
+            "木斧好了，放包里了。",
+        )
+        self.assertEqual(
+            humanize_reply("把做好的木斧拿在手上给玩家看，背包里还有 3 块木板和 2 根木棍。"),
+            "喏，做好的木斧。",
+        )
+
     def test_prompts_require_human_style_and_no_coordinates(self):
         for prompt in (PERSONA_PROMPT, TOOL_PROMPT, SYSTEM_PROMPT):
             self.assertIn("朋友", prompt)

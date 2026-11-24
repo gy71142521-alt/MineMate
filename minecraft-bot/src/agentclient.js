@@ -24,6 +24,7 @@ function safeReply(reply) {
 function createAgentClient(config = {}, { fetchImpl = fetch, clock = Date.now, logger = console } = {}) {
   const options = { ...DEFAULT_AGENT, ...config };
   const controllers = new Set();
+  const steerControllers = new Set();
   const cancelled = new WeakSet();
   let disposed = false;
   let windowStart = clock();
@@ -51,7 +52,7 @@ function createAgentClient(config = {}, { fetchImpl = fetch, clock = Date.now, l
     try {
       const response = await fetchImpl(`${options.url}/api/agent/message`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ player, message: text, ...(Number.isInteger(context.generation) ? { generation: context.generation } : {}) }), signal: controller.signal,
+        body: JSON.stringify({ player, message: text }), signal: controller.signal,
         redirect: 'error'
       });
       // 有界读取响应，超时同时覆盖响应体；不信任上游提供的错误文本。
@@ -79,17 +80,57 @@ function createAgentClient(config = {}, { fetchImpl = fetch, clock = Date.now, l
     }
   }
 
+  function isActive(player) {
+    const name = player.toLowerCase();
+    for (const controller of controllers) if (controller.player === name) return true;
+    return false;
+  }
+
+  async function steer(player, text, context = {}) {
+    if (disposed || !isActive(player)) return { accepted: false };
+    if (typeof text !== 'string' || text.length > 500 || !text.trim()) return { accepted: false };
+    if (!/^[A-Za-z0-9_]{3,16}$/.test(player)) return { accepted: false };
+    const controller = new AbortController();
+    steerControllers.add(controller);
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetchImpl(`${options.url}/api/agent/steer`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ player, message: text }),
+        signal: controller.signal, redirect: 'error'
+      });
+      let size = 0;
+      const chunks = [];
+      for await (const chunk of response.body) {
+        size += chunk.length;
+        if (size > 4096) { controller.abort(); return { accepted: false }; }
+        chunks.push(Buffer.from(chunk));
+      }
+      if (!response.ok) return { accepted: false };
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      return { accepted: body?.success === true && body?.data?.accepted === true };
+    } catch {
+      return { accepted: false };
+    } finally {
+      clearTimeout(timer);
+      steerControllers.delete(controller);
+    }
+  }
+
   function dispose() {
     disposed = true;
     for (const controller of controllers) controller.abort();
+    for (const controller of steerControllers) controller.abort();
     players.clear();
   }
   function cancel(player) {
-    for (const controller of controllers) if (controller.player === player.toLowerCase()) {
+    const name = player.toLowerCase();
+    players.delete(name);
+    for (const controller of controllers) if (controller.player === name) {
       cancelled.add(controller); controller.abort();
     }
   }
-  return { message, dispose, cancel };
+  return { message, dispose, cancel, isActive, steer };
 }
 
 module.exports = { createAgentClient, DEFAULT_AGENT, validIntent, safeReply };

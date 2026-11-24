@@ -11,7 +11,7 @@ FINISH_TOOL = {
     "type": "function",
     "function": {
         "name": "finish_task",
-        "description": "结束当前任务。只有真正完成、部分完成或无法继续时才调用；不要用一段普通文字代替结束。",
+        "description": "结束当前任务。只有真正完成、部分完成或无法继续时才调用；不要用一段普通文字代替结束。summary 是给玩家的自然聊天，不要写坐标、材料清单或系统状态。",
         "parameters": {
             "type": "object",
             "properties": {

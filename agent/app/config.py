@@ -38,8 +38,8 @@ class Settings:
     memory_auto_compact: bool = True
     execution_mode: str = "planned"
     task_planner_enabled: bool = True
-    task_max_steps: int = 12
-    task_max_tool_calls: int = 24
+    task_max_steps: int = 24
+    task_max_tool_calls: int = 32
     task_timeout: float = 120
     task_max_consecutive_errors: int = 3
     task_max_same_error: int = 2
@@ -157,8 +157,8 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         memory_auto_compact=auto_compact == "true",
         execution_mode=execution_mode,
         task_planner_enabled=planner_enabled == "true",
-        task_max_steps=bounded_int_range("TASK_MAX_STEPS", 12, 1, 32),
-        task_max_tool_calls=bounded_int_range("TASK_MAX_TOOL_CALLS", 24, 1, 64),
+        task_max_steps=bounded_int_range("TASK_MAX_STEPS", 24, 1, 64),
+        task_max_tool_calls=bounded_int_range("TASK_MAX_TOOL_CALLS", 32, 1, 64),
         task_timeout=bounded_number("TASK_TIMEOUT", 120, 600),
         task_max_consecutive_errors=bounded_int_range("TASK_MAX_CONSECUTIVE_ERRORS", 3, 1, 10),
         task_max_same_error=bounded_int_range("TASK_MAX_SAME_ERROR", 2, 1, 5),
