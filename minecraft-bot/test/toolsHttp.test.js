@@ -7,10 +7,11 @@ test('真实 HTTP 公开同一注册目录、执行白名单、拦截停止后�
   const bot = new EventEmitter();
   bot.entity = {};
   bot.mineMateStatus = () => ({ connected: true, spawned: true });
+  const logs = [];
   const movement = { follow: () => ({ ok: true }), stop: () => ({ ok: true }) };
   bot.tools = createToolSystem(bot, { movement, perception: { getPlayerState: () => ({ health: 20 }) }, logger: { log() {}, error() {} } });
   bot.tools.guardMovement(); bot.emit('spawn');
-  const server = createApiServer({ bot, movement });
+  const server = createApiServer({ bot, movement, logger: { warn: (line) => logs.push(line) } });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => { bot.emit('end'); server.closeAllConnections(); return new Promise((resolve) => server.close(resolve)); });
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -22,5 +23,6 @@ test('真实 HTTP 公开同一注册目录、执行白名单、拦截停止后�
   assert.equal((await (await send({ ...payload, tool: 'shell', requestId: 'r2' })).json()).data.error.code, 'UNKNOWN_TOOL');
   movement.stop('Steve');
   assert.equal((await send({ ...payload, requestId: 'r3' })).status, 409);
+  assert.match(logs[0], /tool=query_status requestId=r3 requestGeneration=0 currentGeneration=1 active=- lease=none/);
   assert.equal((await send({ ...payload, generation: '0' })).status, 400);
 });

@@ -18,8 +18,7 @@ Node 聊天
       └─ AGENT_EXECUTION_MODE=legacy  → ToolLoop（旧行为，兼容/回归）
 ```
 
-`AgentRuntime` 不直接操作 Minecraft；所有游戏动作仍经 Node Tool Registry。
-Skill 目录和后台 `TaskManager` 未改动。
+`AgentRuntime` 不直接操作 Minecraft；所有游戏动作仍经 Node Tool Registry。Runtime 通过 Python 控制工具 `execute_skill` 动态暴露 Skill Registry，Skill 再复用 SkillManager/TaskManager 和 Node Tool Registry。
 
 ## 2. 一次任务的生命周期
 
@@ -30,8 +29,9 @@ Skill 目录和后台 `TaskManager` 未改动。
       direct → 不生成计划
       plan   → 生成 1–8 个结果导向步骤
 4. Executor 循环：
-      LLM 看到当前计划、真实工具结果和 finish/update_plan 工具
+      LLM 看到当前计划、真实工具结果、execute_skill 和 finish/update_plan 工具
       ├─ 普通工具 → 校验 → Node 执行 → 结果回填
+      ├─ execute_skill → Skill 参数校验 → SkillManager 执行/核验 → 结果回填
       ├─ update_plan → 替换剩余计划
       └─ finish_task → 模型宣布结束
 5. Harness 在步数/调用/时间/连续错误/重复失败超限时兜底结束
@@ -74,6 +74,38 @@ Skill 目录和后台 `TaskManager` 未改动。
 - 连续错误达到阈值会追加编排器提示，要求换方案/改计划/结束。
 
 模型可调用 `update_plan` 替换剩余步骤，Harness 校验后追加新计划上下文。
+
+如果目标与已注册 Skill 匹配，模型优先调用：
+
+```json
+{"name":"execute_skill","arguments":{
+  "skill":"craft_item",
+  "arguments":{"item_name":"crafting_table","count":1}
+}}
+```
+
+Runtime 会等待 Skill 进入终态，把 `verification`、工具账本和真实错误作为 `role=tool` 回填。Skill 失败或不确定时不会自动变成成功；取消、超时和客户端断开会取消在途 Skill。
+
+Runtime 在读取 Skill 的终态后还会等待 `TaskManager` 的清理收尾。Skill 的验证可能先写入 `completed`，Node 租约随后才释放；如果不等待，下一步放置熔炉或启动熔炼会收到 `BUSY`。因此只有租约释放完成后，Runtime 才把结果交给模型继续下一步。
+
+正常释放租约时 Node 保持当前 `generation`，因为同一个 Runtime 任务可能随后继续调用放置或其他 Node 工具。显式取消、租约过期和 Bot 生命周期变化才递增 generation，使迟到的旧请求返回 `STALE_TASK`。
+
+### 4.1 Skill 优先路由
+
+`planned` 模式下，direct 和 plan 共用同一策略。Planner 和 Executor 的工具列表均将动态 `execute_skill` 放在首位；Planner 的摘要额外保留全部 Skill 名称，避免描述截断后丢失后面的能力。
+
+| 目标 | 首选入口 | 底层入口的处理 |
+| --- | --- | --- |
+| 按名称/类型搜索 | `explore_and_find` | 隐藏 `find_block`；`find_entity` 为战斗索敌保留并注明优先规则 |
+| 按物品及数量采集 | `gather_resource` | `mine_block` 保留供明确坐标的单方块挖掘；描述与系统提示要求资源采集优先 Skill |
+| 合成物品 | `craft_item` Skill | 隐藏 Node 同名工具，包含不需要工作台的中间物品合成 |
+| 开始熔炼/投料 | `smelt_item` Skill | Node 同名工具只暴露 status/take；独立补料/补燃料子工具保留 |
+
+仅在相应 Skill 已注册时应用规则。不修改 Node 注册表、HTTP 接口、固定聊天指令或 Skill 内部可调用的完整工具目录。旧记忆或模型仍输出原生 `craft_item`/`find_block`/`smelt_item(start)` 时，Runtime 回填 `SKILL_REQUIRED`，不执行游戏操作，也不擅自把 Node 的 `position` 参数转换成 Skill 的 `table_position`。不能因 Skill 失败就自动退回底层重做副作用；应读取真实缺口、补充前置条件后重新选择。
+
+例如“制作一个铁胸甲”：材料和工作台已就绪时调用 `execute_skill(craft_item, {item_name: iron_chestplate, count: 1})`。若工作台只在背包中，可先检查放置位置、用 `place_block` 放好，再调用合成 Skill。若缺材料，模型先按真实配方安排采集或中间物品合成；Skill 本身不会递归准备材料。看到 Node 日志中的底层 `craft_item` 是正常现象，因为 Skill 内部仍必须调用它，判断是否走 Skill 应查看 Python 的 `[Skills] 模型选择` 日志。
+
+重启 Python 后，在测试世界检查上述铁胸甲任务，再检查采集木头、找工作台和熔炼粗铁；确认出现对应 Skill 名称/参数。回归具体坐标挖掘、跟随/停止、放置工作台、单独补煤和取出产品。采集、实体搜索和独立熔炉操作仍保留底层能力，语义选择依赖模型遵循提示；自动化路由测试不等于真实模型或 Minecraft 验收。
 
 ## 5. 谁决定任务结束
 

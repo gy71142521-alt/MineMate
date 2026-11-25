@@ -3,7 +3,7 @@
 from .models import FinishArgs, PlanDecision, PlanStep, UpdatePlanArgs
 from .planner import Planner
 from .runtime import AgentRuntime, RuntimeState
-from .tools import CONTROL_TOOL_NAMES, FINISH_TOOL, UPDATE_PLAN_TOOL
+from .tools import CONTROL_TOOL_NAMES, FINISH_TOOL, UPDATE_PLAN_TOOL, execute_skill_tool
 
 __all__ = [
     "AgentRuntime",
@@ -16,4 +16,5 @@ __all__ = [
     "RuntimeState",
     "UPDATE_PLAN_TOOL",
     "UpdatePlanArgs",
+    "execute_skill_tool",
 ]

@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock
 
 from app.orchestration import Planner
 from app.orchestration.models import PlanDecision
+from app.orchestration.tools import execute_skill_tool
+from skills.catalog import create_skill_registry
 
 
 class PlannerTests(unittest.IsolatedAsyncioTestCase):
@@ -40,3 +42,11 @@ class PlannerTests(unittest.IsolatedAsyncioTestCase):
         decision = await planner.decide([], [])
         self.assertEqual(decision.mode, "direct")
         self.assertEqual(llm.plan.await_count, 0)
+
+    async def test_skill_names_survive_planner_description_truncation(self):
+        planner, llm = self.planner([{"mode": "direct", "reason": "skill"}])
+        skills = create_skill_registry().list()
+        await planner.decide([], [execute_skill_tool(skills)])
+        summary = llm.plan.call_args.args[1][0]
+        self.assertEqual(summary["skills"], [skill["name"] for skill in skills])
+        self.assertLessEqual(len(summary["description"]), 240)

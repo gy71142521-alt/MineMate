@@ -169,6 +169,8 @@ function createApiServer({ bot, movement, perception, tools = bot?.tools, getSta
           return;
         }
         if (body.generation !== tools.getState().generation) {
+          const current = tools.getState();
+          logger.warn?.(`[HTTP] 拒绝过期工具请求 tool=${body.tool} requestId=${body.requestId} requestGeneration=${body.generation} currentGeneration=${current.generation} active=${current.active ?? '-'} lease=${current.lease ? 'held' : 'none'}`);
           sendJson(response, 409, errorBody('STALE_TASK', '任务已被停止或生命周期变化取消。')); return;
         }
         // 工具失败属于真实执行结果，保持 HTTP 200 和完整工具信封，供模型读取。

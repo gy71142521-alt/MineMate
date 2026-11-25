@@ -5,13 +5,13 @@ const { ensure } = require('./common');
 function createSession({ access, isReady, isBusy, onRevoke, ttlMs = 30000, now = Date.now }) {
   const instanceId = randomUUID();
   let lease = null, timer;
-  function revoke(notify = true) {
+  function revoke(notify = true, reason = 'revoked') {
     const previous = lease;
     lease = null;
     clearTimeout(timer);
-    if (previous && notify) onRevoke(previous);
+    if (previous && notify) onRevoke(previous, reason);
   }
-  function expire() { if (lease && now() >= lease.expiresAt) revoke(); }
+  function expire() { if (lease && now() >= lease.expiresAt) revoke(true, 'expired'); }
   function arm() {
     clearTimeout(timer);
     timer = setTimeout(expire, Math.max(1, lease.expiresAt - now()));
@@ -34,7 +34,7 @@ function createSession({ access, isReady, isBusy, onRevoke, ttlMs = 30000, now =
       arm();
     } else {
       ensure(lease && context.leaseId === lease.leaseId && username.toLowerCase() === lease.username.toLowerCase(), 'STALE_LEASE', '任务控制租约已失效。');
-      if (action === 'release') { revoke(); return { instanceId, lease: null }; }
+      if (action === 'release') { revoke(true, 'released'); return { instanceId, lease: null }; }
       ensure(action === 'heartbeat', 'INVALID_ARGUMENT', '租约动作无效。');
       lease.expiresAt = now() + ttlMs;
       arm();

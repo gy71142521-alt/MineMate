@@ -149,6 +149,17 @@ class SkillExecutionTests(unittest.IsolatedAsyncioTestCase):
         result["data"]["item"] = "fake"
         self.assertEqual(self.manager.view(result["execution_id"], "Steve")["data"]["item"], "crafting_table")
 
+    async def test_wait_view_waits_for_task_cleanup_before_next_skill_can_start(self):
+        self.skill.mode = "walk"
+        record = await self.manager.submit(self.request())
+        result = await self.manager.wait_view(record["execution_id"], "Steve")
+        self.assertEqual(result["status"], "completed")
+        self.assertFalse(self.node.leased)
+        next_record = await self.manager.submit(self.request(request_id="next"))
+        next_result = await self.manager.wait_view(next_record["execution_id"], "Steve")
+        self.assertEqual(next_result["status"], "completed")
+        self.assertFalse(self.node.leased)
+
     async def test_tool_success_without_goal_evidence_is_not_skill_success(self):
         self.node.lying = True
         result = await self.finish()

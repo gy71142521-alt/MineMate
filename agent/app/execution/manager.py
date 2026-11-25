@@ -108,6 +108,16 @@ class TaskManager:
             raise LLMError(404, "TASK_NOT_FOUND", "没有该玩家的任务记录。")
         return copy.deepcopy({key: value for key, value in record.items() if key not in ("fingerprint", "context")})
 
+    async def wait_settled(self, task_id: str) -> None:
+        """等待任务的 finally 清理完成后再让调用方启动下一项副作用。
+
+        ExecutionContext.finish() 会先写入终态，随后 `_run()` 才释放 Node
+        租约。只看 status 可能在这个窗口内让下一项操作撞上 BUSY。
+        """
+        work = self._work.get(task_id)
+        if work is not None and not work.done():
+            await asyncio.shield(work)
+
     async def cancel(self, task_id: str, player: str) -> dict:
         self.view(task_id, player)
         work = self._work.get(task_id)

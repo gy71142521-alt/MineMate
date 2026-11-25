@@ -73,6 +73,11 @@ class SkillManager:
             created_at=record["created_at"], updated_at=record["updated_at"]
         ).model_dump()
 
+    async def wait_view(self, execution_id: str, player: str) -> dict:
+        """返回 Skill 结果前等待共享执行槽和 Node 租约完成清理。"""
+        await self.executor.wait_settled(execution_id)
+        return self.view(execution_id, player)
+
     async def cancel(self, execution_id: str, player: str) -> dict:
         self.view(execution_id, player)
         await self.executor.cancel(execution_id, player)

@@ -123,6 +123,7 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 - Node 注册表仍是工具 Schema 唯一来源。`inspect_recipe`、`inspect_smelting_recipe`、`find_interaction_positions` 为只读查询；候选站位不等于路径可达，导航到附近后必须重新检查实际距离、视线及脚下支撑。
 - `pending` 导航通过 `get_movement_task(task_id)` 等待原任务，禁止反复启动相同导航。`smelt_item(start)` 的后台续接只启动一次，再有界 status/take；停止不会撤回已投入的原料/燃料。
 - 后台任务使用 Node 的 `instanceId + generation + leaseId`。`tools/session.js` 管理整任务控制权与 30 秒心跳失效；停止、死亡、换维度和断线撤销。旧实例/旧租约的清理不得影响新任务。现有接口可不传租约，但修改操作不能插入正在持有租约的任务。
+- Node 租约的正常 `release` 是同一个 Agent Runtime 任务中 Skill/后台子任务间的交接，不得递增 `generation`；否则随后合法的 Node 工具会被误判为 `STALE_TASK`。显式取消、租约过期、死亡/重生/断线仍须撤销任务并使旧 generation 失效。
 - 同一请求 ID 的工具回执最多保留 10 分钟，最多 512 项；后台任务记录为内存中最多 64 项。结果不确定时查询原回执和最新状态，禁止盲目重发副作用；服务重启不自动恢复任务，也不提供跨重启的持久幂等保证。
 - 前序结果引用只允许 `$ref: {step, path}` 指向已完成步骤的 JSON 字段/数组索引；替换后重新按 Node Schema 校验。禁止 eval、表达式或访问对象属性。
 - 工具完成不等于最终目标完成。第一版后台验证仅支持显式背包数量/增量条件；没有验证条件时返回 `finished_unverified`，不得标成 `completed`。
@@ -160,6 +161,9 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 
 ## 13. 任务执行运行时（TaskRuntime）
 
+- 自然语言入口采用 Skill 优先：Planner 与 Executor 使用相同的动态工具视图，`execute_skill` 排在首位；已注册对应 Skill 时隐藏原生 `craft_item`/`find_block`，原生 `smelt_item` 仅暴露 status/take。Runtime 拦截旧记忆输出的这些替代入口，回填 `SKILL_REQUIRED` 而不执行；不把旧参数自动转换成 Skill 参数。按资源数量采集、类型搜索和整体熔炼由提示词/工具描述优先路由 Skill；精确坐标挖掘、战斗索敌、放置、独立熔炉补料/取出继续可用。视图不得修改完整 Node 目录或影响 Skill 内部调用；未注册 Skill 不隐藏工具，legacy/固定聊天/HTTP 接口保持兼容。修改该策略需覆盖真实 Node 目录契约、direct/plan、旧调用拦截和前置工作台放置测试。
+- Skill 终态交给 Runtime 前必须等待 `TaskManager` 的 `_run()` finally 完成租约释放；`ExecutionContext.finish()` 先写 `completed`、后释放 Node 控制权，禁止下一步在此窗口内直接发送修改操作，否则可能收到 `BUSY`。取消/超时仍按原流程清理并保留不确定结果。
+
 - 自然语言入口默认使用 `AgentRuntime`（`AGENT_EXECUTION_MODE=planned`）；旧 `ToolLoop` 仅保留为 `legacy` 兼容路径，不得在新功能中继续扩散旧“失败即结束”语义。
 - 简单目标可直接执行；复杂目标必须先由 Planner 生成结果导向步骤。Planner 只输出 strict JSON（direct/plan），不执行工具、不写坐标或固定工具序列。
 - 工具失败、`pending`、`uncertain` 必须作为 `role=tool` observation 回填，由模型决定重试、换工具、`update_plan` 或结束；不得把这些结果直接当成任务终态。
@@ -169,3 +173,4 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 - `finish_task`/`update_plan` 是 Python 控制工具，不进入 Node 注册表；Node 仍是游戏工具 Schema 唯一来源。Skill 目录和 `TaskManager` 不受该运行时改造影响。
 - Node 的 `AGENT_TIMEOUT_MS` 必须大于等于 Python `TASK_TIMEOUT`；修改超时需同时重启两端。新增控制工具/兜底策略必须补 `agent/test/test_runtime.py` 或对应测试。
 - 运行中插话通过 `POST /api/agent/steer` 进入当前 turn 的 next-step 队列，在工具批次结算后作为 `user/message` 插入；不得在工具执行中途插入，也不得由 Harness 解析“停止/换目标”。模型看到插话后自行选择 `stop_movement`/`update_plan`/`finish_task`；固定 `停止` 仍是优先 abort 的旧指令路径。插话写入当前 turn 记忆，但队列是单进程内存，不提供跨重启持久保证。
+- 自然语言 Runtime 通过 Python 控制工具 `execute_skill` 动态读取 `SkillRegistry`，再复用现有 `SkillManager`/`TaskManager` 执行已注册 Skill；Skill 的参数、底层 Node 工具和独立核验仍是唯一权威来源。模型可以选择 Skill，但不得把 Skill 当作 Node 工具或绕过注册表；Skill 执行结果（含 verification、steps 和真实错误）必须回填后才能继续或 `finish_task`。Runtime 取消、超时和客户端断开时必须取消在途 Skill，释放共享租约。

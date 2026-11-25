@@ -27,10 +27,14 @@ class Planner:
             function = definition.get("function") if isinstance(definition, dict) else None
             if not isinstance(function, dict):
                 continue
-            summaries.append({
+            summary = {
                 "name": function.get("name"),
                 "description": str(function.get("description", ""))[:240],
-            })
+            }
+            if function.get("name") == "execute_skill":
+                # 描述截断不能让 Planner 只看到第一个 Skill；名称直接来自动态 Schema。
+                summary["skills"] = function.get("parameters", {}).get("properties", {}).get("skill", {}).get("enum", [])
+            summaries.append(summary)
         system_prompt = PLANNER_PROMPT.replace("{tools}", json.dumps(summaries, ensure_ascii=False))
         for attempt in range(self.max_attempts):
             try:

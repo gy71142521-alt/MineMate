@@ -87,7 +87,8 @@ if settings.memory_enabled:
 tool_client = ToolClient(settings)
 legacy_tool_loop = ToolLoop(settings, llm_client, tool_client, memory=memory_manager)
 runtime = (
-    AgentRuntime(settings, llm_client, tool_client, memory=memory_manager)
+    AgentRuntime(settings, llm_client, tool_client, memory=memory_manager,
+                 skill_manager=skill_manager)
     if settings.execution_mode == "planned"
     else None
 )

@@ -17,12 +17,16 @@ function createRegistry(bot, { movement, perception, ownerUsername = '', logger 
   const session = createSession({ access, ttlMs: leaseTtlMs, now,
     isReady: () => !disposed && ready && bot.entity && bot.isAlive !== false,
     isBusy: () => Boolean(active || movement?.getState?.().type && movement.getState().type !== 'idle'),
-    onRevoke: (previous) => {
+    onRevoke: (previous, reason) => {
       try {
         // 租约仍属于原任务时统一释放持续模式和移动；手动新目标已先撤销旧租约，不走这里。
         movement?.stop(previous.username);
       } catch { logger.error('[Tools] 租约撤销后停止移动失败。'); }
-      finally { cancel(previous.username, true); }
+      finally {
+        // 正常 release 是任务边界，后续 Runtime 步骤仍属于同一代任务。
+        // 过期/异常撤销才递增 generation 并使旧请求失效。
+        if (reason !== 'released') cancel(previous.username, true);
+      }
     } });
   function cancel(username, internal = false, requestId = null) {
     if (!internal && !access(username)) return false;

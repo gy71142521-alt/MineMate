@@ -30,7 +30,8 @@ from ..tool_loop import (
 from .models import FinishArgs, PlanDecision, UpdatePlanArgs
 from .planner import Planner
 from .prompts import orchestrator_system, render_plan
-from .tools import CONTROL_TOOL_NAMES, FINISH_TOOL, UPDATE_PLAN_TOOL
+from .tools import CONTROL_TOOL_NAMES, FINISH_TOOL, UPDATE_PLAN_TOOL, execute_skill_tool, skill_first_toolset
+from skills import SkillManager, SkillRequest
 
 logger = logging.getLogger("minemate.orchestration")
 
@@ -52,12 +53,16 @@ class RuntimeState:
     executing: bool = False
     pending: bool = False
     request_id: str | None = None
+    skill_execution_id: str | None = None
+    preferred_skills: dict[str, str] = field(default_factory=dict)
 
 
 class AgentRuntime:
     def __init__(self, settings: Settings, llm: LLMClient, client: ToolClient,
-                 memory: MemoryManager | None = None, planner: Planner | None = None):
+                 memory: MemoryManager | None = None, planner: Planner | None = None,
+                 skill_manager: SkillManager | None = None):
         self.settings, self.llm, self.client, self.memory = settings, llm, client, memory
+        self.skill_manager = skill_manager
         self.planner = planner or Planner(llm, enabled=settings.task_planner_enabled)
         # Player -> generation of the currently running turn, and next-step
         # steering messages. The dict is owned by this single runtime process.
@@ -83,13 +88,17 @@ class AgentRuntime:
                     {"type": "function", "function": {key: definition[key] for key in ("name", "description", "parameters")}}
                     for definition in catalog.values()
                 ]
+                skill_definitions = self.skill_manager.registry.list() if self.skill_manager else []
+                visible_tools, state.preferred_skills = skill_first_toolset(node_tools, skill_definitions)
+                skill_tool = execute_skill_tool(skill_definitions) if skill_definitions else None
+                planner_tools = ([skill_tool] if skill_tool else []) + visible_tools
                 memory_turn, messages = await self._initial_messages(
-                    request, node_tools, snapshot, memory_turn)
-                decision = await self.planner.decide(messages, node_tools)
+                    request, planner_tools, snapshot, memory_turn)
+                decision = await self.planner.decide(messages, planner_tools)
                 if decision.mode == "plan":
                     state.plan = decision
                     messages.append({"role": "user", "content": render_plan(decision)})
-                tools = node_tools + [FINISH_TOOL, UPDATE_PLAN_TOOL]
+                tools = planner_tools + [FINISH_TOOL, UPDATE_PLAN_TOOL]
                 result = await self._loop(
                     request, state, messages, tools, catalog, generation, memory_turn)
                 memory_reason = "completed" if result["reply"] else memory_reason
@@ -211,6 +220,9 @@ class AgentRuntime:
                     if result is not None:
                         return result
                     continue
+                if name == "execute_skill":
+                    await self._execute_skill(request, state, messages, memory_turn, call, arguments)
+                    continue
                 updated = await self._update_plan(request, state, messages, memory_turn, call, arguments)
                 if not updated:
                     return await self._fallback(request, state, memory_turn, "replan_limit")
@@ -269,6 +281,13 @@ class AgentRuntime:
                            name: str, arguments: dict, fingerprint: str, generation: int) -> dict:
         if state.tool_calls >= self.settings.task_max_tool_calls:
             return self._failure(name, "CALL_LIMIT", "本次任务的工具调用次数已达到上限。")
+        # 旧记忆可能仍含同名 Node 调用；即使模型输出隐藏入口也不执行副作用。
+        preferred = state.preferred_skills.get(name)
+        if preferred and (name != "smelt_item" or arguments.get("action") == "start"):
+            state.tool_calls += 1
+            logger.info("[Skills] 底层调用已拦截 tool=%s preferred_skill=%s", name, preferred)
+            return self._failure(name, "SKILL_REQUIRED",
+                                 f"请调用 execute_skill，skill={preferred}，arguments 必须符合该 Skill 定义；不要直接调用同名或被替代的 Node 工具。")
         # Do not repeat an identical failed call indefinitely. The model sees the
         # error and must change the plan/arguments or finish.
         if any(existing[0] == name and existing[1] == fingerprint and count >= self.settings.task_max_same_error
@@ -288,6 +307,84 @@ class AgentRuntime:
             state.executing = False
         state.tool_calls += 1
         return result
+
+    async def _execute_skill(self, request: MessageRequest, state: RuntimeState,
+                             messages: list[dict], memory_turn: MemoryTurn | None,
+                             call: ToolCall, arguments: dict) -> None:
+        """Dispatch a model-selected Skill through the existing SkillManager."""
+        if self.skill_manager is None:
+            result = self._failure("execute_skill", "SKILLS_NOT_CONFIGURED", "Skill 系统尚未就绪。")
+        else:
+            try:
+                skill_name = arguments["skill"]
+                skill_args = arguments["arguments"]
+                if not isinstance(skill_name, str) or not isinstance(skill_args, dict):
+                    raise LLMError(422, "INVALID_SKILL_ARGUMENT", "Skill 参数无效。")
+                # 记录模型最终选择的 Skill 和参数，便于排查自然语言路由问题。
+                # 参数只用于诊断：限长并沿用日志脱敏规则，不记录内部执行对象。
+                skill_args_text = diagnostics.safe_text(
+                    json.dumps(skill_args, ensure_ascii=False, sort_keys=True, default=str),
+                    (self.settings.llm_api_key,),
+                    limit=1200,
+                )
+                logger.info(
+                    "[Skills] 模型选择 skill=%s arguments=%s player=%s call_id=%s",
+                    diagnostics.safe_text(skill_name, (self.settings.llm_api_key,), 120),
+                    skill_args_text,
+                    diagnostics.safe_text(request.player, (self.settings.llm_api_key,), 120),
+                    diagnostics.safe_text(call.id, (self.settings.llm_api_key,), 120),
+                )
+                remaining_calls = max(1, self.settings.task_max_tool_calls - state.tool_calls)
+                skill_request = SkillRequest.model_validate({
+                    "player": request.player,
+                    "request_id": f"runtime-skill-{uuid.uuid4().hex}",
+                    "skill": skill_name,
+                    "arguments": skill_args,
+                    "timeout_seconds": min(600, self.settings.task_timeout),
+                    "max_tool_calls": remaining_calls,
+                })
+                submitted = await self.skill_manager.submit(skill_request)
+                execution_id = submitted["execution_id"]
+                state.skill_execution_id = execution_id
+                result_view = submitted
+                # 从类型上判断接口，避免测试替身/动态对象的 AsyncMock 属性被误当成真实等待器。
+                wait_view = getattr(type(self.skill_manager), "wait_view", None)
+                if callable(wait_view):
+                    # 不能只看 completed：Skill 的验证先写终态，TaskManager
+                    # 随后才释放 Node 租约；必须等清理完成再交给模型下一步。
+                    result_view = await self.skill_manager.wait_view(execution_id, request.player)
+                else:
+                    # 兼容旧的测试替身/外部 SkillManager 实现。
+                    while result_view["status"] in {"pending", "running"}:
+                        await asyncio.sleep(0.05)
+                        result_view = self.skill_manager.view(execution_id, request.player)
+                state.skill_execution_id = None
+                state.tool_calls += max(1, int(result_view.get("calls", 0)))
+                result = {
+                    "success": result_view["success"], "tool": "execute_skill",
+                    "data": {key: result_view.get(key) for key in
+                              ("execution_id", "skill", "status", "data", "verification", "calls", "steps")},
+                    "error": result_view.get("error"),
+                }
+            except LLMError as error:
+                state.skill_execution_id = None
+                result = self._failure("execute_skill", error.code, error.message)
+            except asyncio.CancelledError:
+                state.skill_execution_id = None
+                raise
+            except Exception as error:
+                state.skill_execution_id = None
+                logger.warning("[Runtime] Skill 执行异常 skill=%s error=%s",
+                               arguments.get("skill", "-"), type(error).__name__)
+                result = self._failure("execute_skill", "SKILL_EXECUTION_FAILED", "Skill 执行异常。")
+        payload = [call.model_dump()]
+        await self._record_assistant(memory_turn, None, payload)
+        await self._record_tool_result(memory_turn, call.id, "execute_skill", result)
+        messages.append({"role": "assistant", "content": None, "tool_calls": payload})
+        messages.append({"role": "tool", "tool_call_id": call.id,
+                         "content": json.dumps(result, ensure_ascii=False)})
+        await self._observe(state, messages, result, "execute_skill",
+                            json.dumps([arguments.get("skill"), arguments.get("arguments")], sort_keys=True))
 
     async def _observe(self, state: RuntimeState, messages: list[dict], result: dict,
                        name: str, fingerprint: str) -> None:
@@ -499,6 +596,12 @@ class AgentRuntime:
             logger.warning("[Runtime] 关闭记忆轮次失败 reason=%s error=%s", reason, type(error).__name__)
 
     async def _cancel(self, state: RuntimeState, player: str) -> None:
+        if state.skill_execution_id and self.skill_manager is not None:
+            try:
+                await self.skill_manager.cancel(state.skill_execution_id, player)
+            except Exception as error:
+                logger.warning("[Runtime] 取消 Skill 失败 error=%s", type(error).__name__)
+            state.skill_execution_id = None
         if not (state.executing or state.pending):
             return
         try:

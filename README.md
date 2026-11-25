@@ -13,11 +13,11 @@ Agent 的事件日志、按玩家隔离的上下文、压缩摘要、SQLite 持�
 
 查看 [现有工具使用指南](docs/tools-guide.md)：完整列出 34 个工具的能力、参数示例、前置条件、数量/距离限制、组合流程及常见错误。
 
-物品和方块名称不再由 Python 维护静态别名。涉及资源的自然语言请求会先调用 Node.js 的 `resolve_resource`，从当前 Mineflayer 运行时 registry（包括已加载的模组内容）返回候选；候选不唯一时先澄清，复杂任务由 Planner/Executor 运行时处理；Skill 的自然语言路由仍待接入。
+物品和方块名称不再由 Python 维护静态别名。涉及资源的自然语言请求会先调用 Node.js 的 `resolve_resource`，从当前 Mineflayer 运行时 registry（包括已加载的模组内容）返回候选；候选不唯一时先澄清，复杂任务由 Planner/Executor 运行时处理，支持优先路由已注册 Skill。
 
 Planning 前置接口已补齐：移动终态、配方/交互站位查询、后台显式工具序列、熔炼续接、整任务租约和执行回执。新增接口、请求示例和游戏验收见 [Task 007 前置衔接说明](docs/tasks/task007-preparation.md)。当前尚未接入 LLM 自动计划生成或重新规划；原自然语言消息接口保持 Task 006 行为。
 
-Task 006.5 已实现阶段 A 基础设施，以及 `explore_and_find`、`gather_resource`、`craft_item`、`smelt_item` 四个 Skill：分别负责搜索与接近、采集与拾取、合成、熔炼。各技能使用真实游戏状态核验目标。测试脚本可直接调用 Skill、显示进度和完整工具账本，操作示例见 [Skill 实施与测试说明](docs/tasks/task0065-skills.md)。自然语言选择 Skill 尚未接入，留待阶段 F。无需新增依赖或修改现有 `.env`。
+Task 006.5 已实现阶段 A 基础设施，以及 `explore_and_find`、`gather_resource`、`craft_item`、`smelt_item` 四个 Skill：分别负责搜索与接近、采集与拾取、合成、熔炼。各技能使用真实游戏状态核验目标。测试脚本可直接调用 Skill、显示进度和完整工具账本，操作示例见 [Skill 实施与测试说明](docs/tasks/task0065-skills.md)。在 `TOOL_CALLING_ENABLED=true` 且 `AGENT_EXECUTION_MODE=planned` 时，Runtime 现在通过动态 `execute_skill` 控制工具把自然语言目标路由到已注册 Skill；Skill 返回真实核验证据后，模型再决定是否结束。仍需真实 Minecraft 验收，且模型必须能正确提取 Skill 参数。
 
 业务 Skill 按“一技能一目录”组织。首个技能的 [SKILL.md](agent/skills/explore_and_find/SKILL.md) 提供用途、输入与测试命令，[SOP.md](agent/skills/explore_and_find/SOP.md) 记录工具顺序和验收；同目录 `metadata.py` 是运行时元数据及参数的唯一代码来源，`skill.py` 实现执行。当前暂不添加辅助资源，说明文件尚未接入 LLM。
 
@@ -28,6 +28,8 @@ Task 006.5 已实现阶段 A 基础设施，以及 `explore_and_find`、`gather_
 熔炼 Skill 前置工具已补齐：`furnace_add_input` 添加/补充同类原料，`furnace_add_fuel` 添加/补充燃料（空槽优先煤炭，无煤则选择已支持燃料），`furnace_take_output` 独立取出当前输出整栈，支持 64 个。已有燃料槽只同类补充，工艺冲突不会清空炉子；另选熔炉留给 Skill。独立测试脚本为 `scripts/test-furnace-tool.ps1`，逐条命令、支持范围和真实游戏验收见 [熔炉工具说明](docs/tools-guide.md#103-添加补充与独立取出)。原 `smelt_item(start/status/take)` 接口继续可用。
 
 第四个技能见 [smelt_item 技能说明](agent/skills/smelt_item/SKILL.md) 和 [熔炼 SOP](agent/skills/smelt_item/SOP.md)。给 Bot 64 个粗铁和 8 个煤炭，在 16 格内放置空普通熔炉，运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-smelt-skill.ps1 -Player Steve -ItemName raw_iron -Count 64`：找兼容炉、精确接近、投放原料/燃料、核验实际转移后结束并释放控制权。当前只负责启动熔炼，不等待加工、不取产品、不自动补燃料，尚未实现收集 Skill。`count` 是本次新增原料总数（1～64）；优先填当前炉，剩余量使用其它炉。`-UseExisting` 允许同工艺续接但不取走原有产品，输出满槽时跳过。结果 `completion_scope=furnace_loading`，`smelting_completed=null`；弱燃料待补量或剩余燃烧容量未知会明确提示。总容量不足保留已投/剩余量，停止或断线不回滚材料。
+
+自然语言目标采用 **Skill 优先**：搜索、采集、合成、启动熔炼优先走 `execute_skill`；合成和方块搜索的重叠底层入口已从模型工具列表移除，旧记忆输出这些调用时会被拦截。放工作台、具体坐标挖掘、战斗索敌、独立补燃料/取产品等操作仍使用 Tool。重启 Python 后可从 `[Skills] 模型选择 skill=... arguments=...` 查看参数；无需重置记忆。规则、边界和验收示例见 [任务执行架构](docs/task-runtime.md#41-skill-优先路由)。
 
 ## 临时测试启动器（Windows）
 

@@ -50,7 +50,7 @@ Pydantic `TOOL_CALL_FORMAT` 是例外：即使 `all` 模式也不打印 `Validat
 - Node 每次请求的路径、状态码、字节数、耗时；
 - 工具目录读取数量与 generation。
 
-不建议长期开 DEBUG：会明显增加日志量，但不会打印提示词、模型回复全文或工具参数全文。
+不建议长期开 DEBUG：会明显增加日志量，但不会打印提示词或模型回复全文。自然语言 Runtime 选择 Skill 时，INFO 级别即可看到下述参数日志。
 
 ## 4. 脱敏边界
 
@@ -63,7 +63,7 @@ Pydantic `TOOL_CALL_FORMAT` 是例外：即使 `all` 模式也不打印 `Validat
 
 不写入日志：
 
-- 模型回复全文、工具参数全文、玩家消息全文；
+- 模型回复全文、底层工具参数全文、玩家消息全文；Skill 参数按下面的例外规则输出；
 - Authorization 请求头；
 - Pydantic 校验错误的 `input`/`context`（只记录字段名和错误类型）；
 - Node 返回的完整工具结果。
@@ -71,6 +71,7 @@ Pydantic `TOOL_CALL_FORMAT` 是例外：即使 `all` 模式也不打印 `Validat
 会写入日志：
 
 - 玩家名、消息长度、工具名、参数缺失项数量、错误码、阶段、耗时、计数；
+- 自然语言 Runtime 选择的 Skill 名称及参数：单行、脱敏，参数最多 1200 字符，超出部分以 `…(+剩余字符数)` 标记；
 - 供应商 HTTP 错误的**有界、脱敏**正文片段（最多 2 KiB 读取、600 字符输出），用于区分“模型不支持 tools”“余额不足”“参数不兼容”等问题。
 
 ## 5. 典型排查
@@ -125,6 +126,16 @@ reason=DUPLICATE_TOOL_CALL code=DUPLICATE_TOOL_CALL detail=duplicate call id too
 ```
 
 后台任务不会把异常吞成 `EXECUTION_FAILED` 一个码：`ExecutionError` 记录具体 code，`LLMError` 记录状态码，未预期异常记录堆栈。
+
+### 5.7 模型选择的 Skill 和参数
+
+重启 Python Agent 后，在 `LOG_LEVEL=INFO` 或 `DEBUG` 下可看到：
+
+```text
+[Skills] 模型选择 skill=gather_resource arguments={"count": 4, "resource": "oak_log"} player=Steve call_id=call_123
+```
+
+此日志来自自然语言 `execute_skill` 路由，显示模型选择的参数，不包含 Skill 补充的默认值。它在基础类型检查后、Skill 提交与完整参数校验前记录，因此后续参数被拒绝时也能用于排查。看到“模型选择”只表示发起调用，不代表执行或核验成功；结果仍应查看后续 `[Execution]` 日志。直接通过测试脚本提交的 Skill 不会产生“模型选择”日志。
 
 ## 6. Node 日志
 

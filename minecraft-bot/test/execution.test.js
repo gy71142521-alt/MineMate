@@ -39,6 +39,18 @@ test('后台租约覆盖操作间隔，读查询仍可用，只有停止或显�
   assert.equal((await f.registry.execute('write', {}, 'Steve', 'three', c)).error.code, 'STALE_LEASE');
 });
 
+test('正常释放后台租约不使后续 Runtime 工具请求 generation 过期', async (t) => {
+  const f = setup(t), context = f.acquire();
+  const before = f.registry.getState().generation;
+  f.registry.lease('release', 'Steve', context);
+  assert.equal(f.registry.getState().generation, before);
+  assert.equal(f.registry.getState().lease, null);
+  const result = await f.registry.execute('write', {}, 'Steve', 'after-release', {
+    instanceId: context.instanceId, generation: context.generation,
+  });
+  assert.equal(result.success, true);
+});
+
 test('心跳延长租约，过期和生命周期撤销原导航；旧租约不能释放新任务', async (t) => {
   let time = 1000;
   const f = setup(t, { leaseTtlMs: 100, now: () => time }), c = f.acquire();

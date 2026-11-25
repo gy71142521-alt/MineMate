@@ -5,9 +5,12 @@ from unittest.mock import AsyncMock
 
 from app.config import load_settings
 from app.intent import MessageRequest
+from app.llm_client import LLMError
 from app.memory import DeterministicSummarizer, InMemoryEventStore, MemoryConfig, MemoryManager
 from app.orchestration import AgentRuntime, PlanDecision, PlanStep
 from app.orchestration.runtime import RuntimeState
+from app.tool_loop import ToolCall
+from skills.catalog import create_skill_registry
 
 
 def empty_schema():
@@ -67,6 +70,193 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reply"], "都弄好了。")
         self.assertEqual(client.execute.await_count, 1)
         self.assertEqual(client.cancel.await_count, 0)
+
+    async def test_runtime_routes_registered_skill_and_returns_skill_evidence(self):
+        class Registry:
+            def list(self):
+                return [{
+                    "name": "craft_item", "description": "按真实配方合成物品。",
+                    "parameters": {"type": "object", "properties": {"item_name": {"type": "string"},
+                                                                            "count": {"type": "integer"}},
+                                   "required": ["item_name", "count"]},
+                }]
+
+        class Skills:
+            def __init__(self):
+                self.registry = Registry()
+                self.request = None
+
+            async def submit(self, request):
+                self.request = request
+                return {"execution_id": "skill-1", "skill": request.skill, "status": "completed",
+                        "success": True, "data": {"actualIncrease": 1}, "verification": {"verified": True},
+                        "error": None, "steps": [{"tool": "craft_item", "status": "completed"}], "calls": 1}
+
+            def view(self, execution_id, player):
+                return {"execution_id": execution_id, "skill": "craft_item", "status": "completed",
+                        "success": True, "data": {"actualIncrease": 1}, "verification": {"verified": True},
+                        "error": None, "steps": [{"tool": "craft_item", "status": "completed"}], "calls": 1}
+
+            async def cancel(self, execution_id, player):
+                return self.view(execution_id, player)
+
+            async def wait_view(self, execution_id, player):
+                return self.view(execution_id, player)
+
+        runtime, llm, client = self.runtime()
+        skills = Skills()
+        runtime.skill_manager = skills
+        llm.tool_completion.side_effect = [
+            {"tool_calls": [tool_call("execute_skill", {"skill": "craft_item",
+                                                           "arguments": {"item_name": "crafting_table", "count": 1}})]},
+            {"tool_calls": [finish_call("工作台做好了。")]},
+        ]
+        with self.assertLogs("minemate.orchestration", level="INFO") as logs:
+            result = await runtime.run(MessageRequest(player="Steve", message="做一个工作台"))
+        selected = [line for line in logs.output if "[Skills] 模型选择" in line]
+        self.assertEqual(len(selected), 1)
+        self.assertIn("skill=craft_item", selected[0])
+        self.assertIn('arguments={"count": 1, "item_name": "crafting_table"}', selected[0])
+        self.assertIn("player=Steve call_id=call1", selected[0])
+        self.assertEqual(result["reply"], "工作台做好了。")
+        self.assertEqual(skills.request.skill, "craft_item")
+        self.assertEqual(skills.request.arguments, {"item_name": "crafting_table", "count": 1})
+        client.execute.assert_not_awaited()
+        tool_messages = [m for m in llm.tool_completion.call_args_list[1].args[0] if m.get("role") == "tool"]
+        self.assertTrue(tool_messages)
+        self.assertIn("verified", tool_messages[-1]["content"])
+
+    async def test_skill_selection_log_redacts_bounds_and_preserves_rejected_arguments(self):
+        runtime, _, _ = self.runtime()
+        runtime.skill_manager = AsyncMock()
+        runtime.skill_manager.submit.side_effect = LLMError(422, "INVALID_SKILL_ARGUMENT", "参数无效。")
+        arguments = {"skill": "gather_resource", "arguments": {
+            "resource": "木头\nunit-secret", "z_extra": "x" * 2000}}
+        call = ToolCall.model_validate(tool_call("execute_skill", arguments))
+        with self.assertLogs("minemate.orchestration", level="INFO") as logs:
+            await runtime._execute_skill(MessageRequest(player="Steve", message="采集木头"),
+                                         RuntimeState(), [], None, call, arguments)
+        selected = [line for line in logs.output if "[Skills] 模型选择" in line]
+        self.assertEqual(len(selected), 1)
+        self.assertNotIn("unit-secret", selected[0])
+        self.assertIn("[已隐藏]", selected[0])
+        self.assertIn("木头", selected[0])
+        self.assertNotIn("\n", selected[0])
+        self.assertIn("…(+", selected[0])
+        self.assertLess(len(selected[0]), 1500)
+        self.assertEqual(arguments["arguments"]["resource"], "木头\nunit-secret")
+
+    def skill_runtime(self, planner_mode="direct"):
+        runtime, llm, client = self.runtime(planner_mode)
+        skills = AsyncMock()
+        skills.registry = create_skill_registry()
+
+        async def submit(request):
+            skills.registry.validate(request.skill, request.arguments)
+            return {"execution_id": "route-skill-1", "skill": request.skill, "status": "completed",
+                    "success": True, "data": {}, "verification": {"verified": True},
+                    "error": None, "steps": [], "calls": 1}
+
+        skills.submit.side_effect = submit
+        runtime.skill_manager = skills
+        definitions = {name: {**demo_definition(), "name": name}
+                       for name in ("craft_item", "find_block", "mine_block", "place_block", "follow_player")}
+        client.catalog.return_value = (definitions, 1)
+        return runtime, llm, client, skills
+
+    async def test_skill_first_catalog_and_dispatch_in_direct_and_plan_modes(self):
+        examples = [
+            ("craft_item", {"item_name": "iron_chestplate", "count": 1}),
+            ("gather_resource", {"resource": "oak_log", "count": 4}),
+            ("explore_and_find", {"target_kind": "block", "target": "crafting_table"}),
+            ("smelt_item", {"item_name": "raw_iron", "count": 3}),
+        ]
+        for mode in ("direct", "plan"):
+            for name, arguments in examples:
+                with self.subTest(mode=mode, skill=name):
+                    runtime, llm, client, skills = self.skill_runtime(mode)
+                    llm.tool_completion.side_effect = [
+                        {"tool_calls": [tool_call("execute_skill", {"skill": name, "arguments": arguments})]},
+                        {"tool_calls": [finish_call()]},
+                    ]
+                    await runtime.run(MessageRequest(player="Steve", message="执行目标"))
+                    selected = skills.submit.call_args.args[0]
+                    self.assertEqual((selected.skill, selected.arguments), (name, arguments))
+                    client.execute.assert_not_awaited()
+                    visible = llm.tool_completion.call_args_list[0].args[1]
+                    names = [tool["function"]["name"] for tool in visible]
+                    self.assertEqual(names[0], "execute_skill")
+                    self.assertNotIn("craft_item", names)
+                    self.assertNotIn("find_block", names)
+                    self.assertIn("mine_block", names)  # 精确坐标挖掘仍可调用。
+                    self.assertEqual(runtime.planner.decide.call_args.args[1], visible[:-2])
+
+    async def test_old_memory_raw_craft_is_rejected_then_model_can_select_skill(self):
+        runtime, llm, client, skills = self.skill_runtime()
+        llm.tool_completion.side_effect = [
+            {"tool_calls": [tool_call("craft_item")]},
+            {"tool_calls": [tool_call("execute_skill", {"skill": "craft_item",
+                                                        "arguments": {"item_name": "iron_chestplate"}})]},
+            {"tool_calls": [finish_call()]},
+        ]
+        await runtime.run(MessageRequest(player="Steve", message="制作一个铁胸甲"))
+        client.execute.assert_not_awaited()
+        skills.submit.assert_awaited_once()
+        history = llm.tool_completion.call_args_list[1].args[0]
+        self.assertTrue(any("SKILL_REQUIRED" in m.get("content", "")
+                            for m in history if m.get("role") == "tool"))
+
+    async def test_workbench_placement_can_precede_crafting_skill(self):
+        runtime, llm, client, skills = self.skill_runtime()
+        llm.tool_completion.side_effect = [
+            {"tool_calls": [tool_call("place_block")]},
+            {"tool_calls": [tool_call("execute_skill", {"skill": "craft_item", "arguments": {
+                "item_name": "iron_chestplate", "table_position": {"x": 1, "y": 64, "z": 0}}})]},
+            {"tool_calls": [finish_call()]},
+        ]
+        await runtime.run(MessageRequest(player="Steve", message="制作一个铁胸甲"))
+        self.assertEqual(client.execute.call_args.args[0], "place_block")
+        self.assertEqual(client.execute.await_count, 1)
+        skills.submit.assert_awaited_once()
+
+    async def test_skill_failure_does_not_unlock_raw_craft(self):
+        runtime, llm, client, skills = self.skill_runtime()
+        skills.submit.side_effect = LLMError(409, "MATERIALS_MISSING", "材料不足。")
+        llm.tool_completion.side_effect = [
+            {"tool_calls": [tool_call("execute_skill", {"skill": "craft_item", "arguments": {
+                "item_name": "iron_chestplate"}})]},
+            {"tool_calls": [tool_call("craft_item")]},
+            {"tool_calls": [finish_call(status="blocked")]},
+        ]
+        await runtime.run(MessageRequest(player="Steve", message="制作铁胸甲"))
+        client.execute.assert_not_awaited()
+        history = llm.tool_completion.call_args.args[0]
+        for code in ("MATERIALS_MISSING", "SKILL_REQUIRED"):
+            self.assertTrue(any(code in m.get("content", "") for m in history if m.get("role") == "tool"))
+
+    async def test_smelt_start_requires_skill_but_status_take_still_execute(self):
+        runtime, _, client = self.runtime()
+        for action in ("start", "status", "take"):
+            with self.subTest(action=action):
+                client.execute.reset_mock()
+                state = RuntimeState(preferred_skills={"smelt_item": "smelt_item"})
+                result = await runtime._execute_one(MessageRequest(player="Steve", message="熔炼"),
+                                                    state, "smelt_item", {"action": action}, action, 1)
+                if action == "start":
+                    self.assertEqual(result["error"]["code"], "SKILL_REQUIRED")
+                    client.execute.assert_not_awaited()
+                else:
+                    client.execute.assert_awaited_once()
+
+    async def test_no_skill_manager_preserves_raw_crafting(self):
+        runtime, llm, client, _ = self.skill_runtime()
+        runtime.skill_manager = None
+        llm.tool_completion.side_effect = [
+            {"tool_calls": [tool_call("craft_item")]},
+            {"tool_calls": [finish_call()]},
+        ]
+        await runtime.run(MessageRequest(player="Steve", message="制作铁胸甲"))
+        client.execute.assert_awaited_once()
 
     async def test_runtime_uses_planner_by_default(self):
         settings = replace(load_settings({}), llm_api_key="unit-secret", llm_model="mock",
