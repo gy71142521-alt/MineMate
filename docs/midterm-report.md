@@ -22,8 +22,8 @@ MineMate 是一个 Minecraft Java Edition AI 玩伴。玩家在游戏聊天框�
 
 本轮复跑：
 
-- Python：**308/308 通过**
-- Node：**182/182 通过**
+- Python：**311/311 通过**
+- Node：**185/185 通过**
 
 主要缺口：
 
@@ -262,8 +262,8 @@ POST /api/agent/memory/{player}/reset
 本轮复跑：
 
 ```text
-Python: 308 tests, OK
-Node:   182 tests, 182 pass
+Python: 311 tests, OK
+Node:   185 tests, 185 pass
 ```
 
 覆盖：
@@ -350,7 +350,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-gather-skill.
 | --- | --- | --- |
 | Agent 架构 | 基本合理 | Node 唯一游戏控制、Python 唯一 LLM 编排、HTTP 边界、Schema 单一来源 |
 | 技术选型 | 有依据 | Mineflayer、FastAPI/Pydantic、OpenAI 兼容 function tools、SQLite |
-| 核心 Runtime | 跑通 | 308 Python / 182 Node；direct/plan/错误回填/finish 均有测试 |
+| 核心 Runtime | 跑通 | 311 Python / 185 Node；direct/plan/错误回填/finish 均有测试 |
 | 工具调用 | 有效、有界 | 39 工具；校验、互斥、超时、取消、真实结果回填 |
 | 记忆 | 有效（Tool Calling） | 事件日志 + 压缩 + SQLite；两轮对话可引用上一轮 |
 | 规划 | 已接入（单轮） | Planner direct/plan、update_plan、finish；计划持久化/DAG 待做 |

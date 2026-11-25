@@ -47,8 +47,13 @@ class RuntimeState:
     invalid_outputs: int = 0
     navigation_failures: int = 0
     navigation_nudged: bool = False
+    navigation_nudge_pending: bool = False
     error_counts: dict[tuple[str, str, str], int] = field(default_factory=dict)
     error_nudged: bool = False
+    error_nudge_pending: bool = False
+    tool_failures: dict[str, int] = field(default_factory=dict)
+    tool_failure_nudged: set[str] = field(default_factory=set)
+    tool_failure_nudge_pending: list[str] = field(default_factory=list)
     last_text: str | None = None
     executing: bool = False
     pending: bool = False
@@ -163,8 +168,11 @@ class AgentRuntime:
                 return await self._fallback(request, state, memory_turn, "invalid_limit")
             if state.navigation_failures >= 5:
                 return await self._fallback(request, state, memory_turn, "navigation_limit")
+            if any(count >= 5 for count in state.tool_failures.values()):
+                return await self._fallback(request, state, memory_turn, "tool_failure_limit")
             if state.tool_calls >= self.settings.task_max_tool_calls:
                 return await self._fallback(request, state, memory_turn, "tool_limit")
+            self._ensure_tool_protocol(messages)
             response = await self.llm.tool_completion(messages, tools, final=False)
             if not isinstance(response, dict):
                 await self._invalid(state, messages, "模型响应不是对象")
@@ -239,14 +247,74 @@ class AgentRuntime:
                     "role": "tool", "tool_call_id": call.id,
                     "content": json.dumps(result, ensure_ascii=False),
                 })
-                await self._observe(state, messages, result, name, fingerprint)
+                await self._observe(state, result, name, fingerprint)
+            if state.tool_failure_nudge_pending:
+                names = "、".join(state.tool_failure_nudge_pending)
+                state.tool_failure_nudge_pending.clear()
+                messages.append({
+                    "role": "user",
+                    "content": f"[编排器提示] {names} 已经多次失败。先查实际掉落/背包/站位，不要继续重复；无法确认就结束。",
+                })
+            if state.navigation_nudge_pending:
+                messages.append({
+                    "role": "user",
+                    "content": "[编排器提示] 导航连续失败。不要反复去同一个实心/不可达位置；先用 inspect_block 检查脚部和头部，换站位或结束。",
+                })
+                state.navigation_nudge_pending = False
+            if state.error_nudge_pending:
+                messages.append({
+                    "role": "user",
+                    "content": "[编排器提示] 连续失败次数较多。请根据错误改变参数/工具或调用 update_plan，仍无法继续则 finish_task。",
+                })
+                state.error_nudge_pending = False
             if state.error_nudged and state.consecutive_errors >= self.settings.task_max_consecutive_errors * 2:
                 return await self._fallback(request, state, memory_turn, "error_limit")
             if state.invalid_outputs >= 4:
                 return await self._fallback(request, state, memory_turn, "invalid_limit")
             if state.navigation_failures >= 5:
                 return await self._fallback(request, state, memory_turn, "navigation_limit")
+            if any(count >= 5 for count in state.tool_failures.values()):
+                return await self._fallback(request, state, memory_turn, "tool_failure_limit")
         return await self._fallback(request, state, memory_turn, "step_limit")
+
+    @staticmethod
+    def _ensure_tool_protocol(messages: list[dict]) -> None:
+        """Repair a missing tool result before a provider sees an invalid turn.
+
+        The normal runtime always appends one tool result per call. This guard
+        is for recovered/corrupted context or a future control-tool branch: an
+        assistant tool_calls message without every immediate tool result makes
+        OpenAI-compatible providers reject the whole request.
+        """
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            calls = message.get("tool_calls") if isinstance(message, dict) else None
+            if message.get("role") != "assistant" or not isinstance(calls, list) or not calls:
+                index += 1
+                continue
+            expected = [str(call.get("id", "")) for call in calls if isinstance(call, dict) and call.get("id")]
+            seen: set[str] = set()
+            cursor = index + 1
+            while cursor < len(messages) and messages[cursor].get("role") == "tool":
+                call_id = str(messages[cursor].get("tool_call_id", ""))
+                if call_id in expected:
+                    seen.add(call_id)
+                cursor += 1
+            missing = [call_id for call_id in expected if call_id not in seen]
+            if missing:
+                insert_at = cursor
+                for call_id in missing:
+                    messages.insert(insert_at, {
+                        "role": "tool", "tool_call_id": call_id,
+                        "content": json.dumps({
+                            "success": False, "tool": "unknown", "data": None,
+                            "error": {"code": "MISSING_TOOL_RESULT", "message": "缺少对应工具结果，已跳过该调用。"},
+                        }, ensure_ascii=False),
+                    })
+                    insert_at += 1
+                logger.warning("[Runtime] 修复缺失的工具结果 count=%d", len(missing))
+            index = cursor if not missing else insert_at
 
     def _validate_calls(self, calls: list, catalog: dict) -> list[tuple[ToolCall, str, dict, str]]:
         if len(calls) > MAX_CALLS_PER_RESPONSE:
@@ -383,10 +451,10 @@ class AgentRuntime:
         messages.append({"role": "assistant", "content": None, "tool_calls": payload})
         messages.append({"role": "tool", "tool_call_id": call.id,
                          "content": json.dumps(result, ensure_ascii=False)})
-        await self._observe(state, messages, result, "execute_skill",
+        await self._observe(state, result, "execute_skill",
                             json.dumps([arguments.get("skill"), arguments.get("arguments")], sort_keys=True))
 
-    async def _observe(self, state: RuntimeState, messages: list[dict], result: dict,
+    async def _observe(self, state: RuntimeState, result: dict,
                        name: str, fingerprint: str) -> None:
         success = result.get("success") is True
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
@@ -404,21 +472,22 @@ class AgentRuntime:
                 state.navigation_failures += 1
                 if state.navigation_failures >= 3 and not state.navigation_nudged:
                     state.navigation_nudged = True
-                    messages.append({
-                        "role": "user",
-                        "content": "[编排器提示] 导航连续失败。不要反复去同一个实心/不可达位置；先用 inspect_block 检查脚部和头部，换站位或结束。",
-                    })
+                    state.navigation_nudge_pending = True
             key = (name, fingerprint, code)
             state.error_counts[key] = state.error_counts.get(key, 0) + 1
+            failures = state.tool_failures.get(name, 0) + 1
+            state.tool_failures[name] = failures
+            if failures >= 3 and name not in state.tool_failure_nudged:
+                state.tool_failure_nudged.add(name)
+                state.tool_failure_nudge_pending.append(name)
             if state.consecutive_errors >= self.settings.task_max_consecutive_errors and not state.error_nudged:
                 state.error_nudged = True
-                messages.append({
-                    "role": "user",
-                    "content": "[编排器提示] 连续失败次数较多。请根据错误改变参数/工具或调用 update_plan，仍无法继续则 finish_task。",
-                })
+                state.error_nudge_pending = True
         else:
             state.consecutive_errors = 0
             state.error_nudged = False
+            state.error_nudge_pending = False
+            state.tool_failures.pop(name, None)
             # A successful action means the world/plan changed; allow a
             # previously failed action to be retried without waiting for a
             # separate update_plan.

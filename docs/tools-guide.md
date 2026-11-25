@@ -77,7 +77,7 @@
 | `get_world_snapshot` | `{}` | `player`、`inventory`、`equipment`、`nearbyEntities`、`nearbyBlocks`、时间、可用性、截断与范围信息 | 统一 JSON 快照，不是全世界地图 |
 | `query_status` | `{}` | 生命、饥饿、数值坐标、经验等级、维度、存活状态、移动任务摘要 | 移动摘要主要反映跟随/导航，不代表所有动画或工具操作 |
 | `inspect_inventory` | `{}` | 非空背包槽位与装备视图：名称、数量、槽位 | 不是按耐久、附魔或 NBT 精确选择物品的接口；不要把物品视图和装备视图简单相加 |
-| `nearby_entities` | `{}` | 玩家、被动生物、敌对生物、其他实体，附 ID、坐标、距离和有效标记 | 默认 16 格、最多 32 项；分类依赖 Mineflayer 实体类型信息，不是威胁决策 |
+| `nearby_entities` | `{}` | 玩家、被动生物、敌对生物、其他实体，附 ID、坐标、距离和有效标记；掉落物额外带 `itemName`/`itemCount` | 默认 16 格、最多 32 项；分类依赖 Mineflayer 实体类型信息，不是威胁决策 |
 | `nearby_blocks` | `{}` | 附近常见方块的名称、坐标、距离 | 默认 5 格、最多 64 项，按距离截断；只查既定资源列表 |
 | `resolve_resource` | `{"query":"raw iron","kind":"item"}` | 当前注册表中的真实名称、显示名和候选；无法唯一确定时澄清 | kind 为 item/block/entity/any；any 仅物品与方块，不维护 Python 静态别名表 |
 
@@ -119,7 +119,7 @@
 | `inspect_block` | `{"position":{"x":10,"y":64,"z":8}}` | 读取该坐标实际方块、距离、当前可挖与可见标记 | 只读，但目标须在交互范围内，默认 ≤4.5 格且区块已加载 |
 | `find_block` | `{"block_name":"iron_ore","radius":8,"max_results":8}` | 在有限范围查找当前版本的指定方块 | radius 可选整数 1～16，默认 5；max_results 可选整数 1～16，默认 8；按距离排列已找到的候选，并返回 `visible`/`diggable`；最近候选不代表可见或可达，挖掘前仍需 inspect_block/调整站位 |
 | `inspect_mining_sources` | `{"item_name":"raw_iron","max_results":16}` | 从运行时 drops 查询可能的来源方块；可选 block_name 限定来源 | 只读，不扫描世界；max_results 1～16，默认 16。不是实际掉落保证，不考虑附魔/服务端数据包，须验证背包 |
-| `mine_block` | `{"block_name":"oak_log","position":{"x":10,"y":64,"z":8},"tool_name":"diamond_axe"}` | 挖掘一个明确坐标、明确名称的方块；可指定工具 | 可选 max_distance 为 1～4.5，默认 4.5；不自动导航、不自动拾取、不批量挖掘 |
+| `mine_block` | `{"block_name":"oak_log","position":{"x":10,"y":64,"z":8},"tool_name":"diamond_axe"}` | 挖掘一个明确坐标、明确名称的方块；可指定工具 | 可选 max_distance 为 1～4.5，默认 4.5；不自动导航、不自动拾取、不批量挖掘；Bot 脚下及紧邻脚边下方的方块会被拒绝，避免把自己困在坑里 |
 
 挖掘前会检查名称是否变化、方块是否允许破坏、是否为脚下支撑、采集条件、工具耐久、距离、可挖性和视线。明确指定的工具不存在或不适用时会报错；未指定且当前手持不能采集时，会尝试从背包寻找可用工具。
 
@@ -144,7 +144,7 @@
 
 | 工具 | 参数示例 | 能做什么 | 范围与限制 |
 | --- | --- | --- | --- |
-| `collect_item` | `{"item_name":"raw_iron","radius":8}` | 接近并拾取指定名称的有效掉落物，核对背包增量 | radius 可选 1～8、默认 8；可选 entity_id 精确指定实体；无数量参数 |
+| `collect_item` | `{"item_name":"raw_iron","radius":8}` | 接近并拾取指定名称的有效掉落物，核对背包增量 | radius 可选 1～8、默认 8；可选 entity_id 精确指定实体；无数量参数。先用 `nearby_entities.itemName` 确认真实名称；指定 entity_id 但名称不符会返回 `ITEM_MISMATCH`。接近后最多等待约 5 秒确认背包增量；未确认返回 uncertain，不要反复重试 |
 | `equip_item` | `{"item_name":"diamond_sword","destination":"hand"}` | 将指定物品装备到目标位置并验证名称 | destination 必填，可选 hand、off-hand、head、torso、legs、feet |
 | `consume_item` | `{"item_name":"enchanted_golden_apple"}` | 装备并食用当前支持的食物、牛奶或蜂蜜，核对物品减少 | 一次消费操作，不支持按数量连续进食；未确认数量下降返回 uncertain |
 | `drop_item` | `{"item_name":"oak_planks","count":4}` | 丢弃明确名称和数量的物品，核对背包减少量 | count 必填整数 1～16；允许任何物品种类及丢完最后一件，不判断贵重程度 |

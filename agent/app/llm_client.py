@@ -185,11 +185,28 @@ class LLMClient:
         # 使用真正的 Chat Completions function tools；不将普通文本解释成工具调用。
         if not self.settings.llm_api_key or not self.settings.llm_model:
             raise LLMError(503, "LLM_NOT_CONFIGURED", "语言模型尚未配置，请设置 API Key 和 Model。")
-        body = await self._request({
-            "model": self.settings.llm_model, "messages": messages, "tools": tools,
-            "tool_choice": "none" if final else "auto", "parallel_tool_calls": False,
-            "max_tokens": self.settings.tool_llm_max_tokens
-        })
+        try:
+            body = await self._request({
+                "model": self.settings.llm_model, "messages": messages, "tools": tools,
+                "tool_choice": "none" if final else "auto", "parallel_tool_calls": False,
+                "max_tokens": self.settings.tool_llm_max_tokens
+            })
+        except LLMError as error:
+            if error.code == "LLM_TOOL_CALLING_REJECTED":
+                # Safe shape only: role and call ids, never message content.
+                shape = []
+                for message in messages[-16:]:
+                    if not isinstance(message, dict):
+                        shape.append("invalid")
+                    elif message.get("role") == "assistant":
+                        calls = [str(call.get("id")) for call in (message.get("tool_calls") or []) if isinstance(call, dict)]
+                        shape.append(f"assistant:calls={','.join(calls) or '-'}")
+                    elif message.get("role") == "tool":
+                        shape.append(f"tool:{message.get('tool_call_id', '-')}")
+                    else:
+                        shape.append(str(message.get("role", "-")))
+                logger.warning("[LLM] 工具消息序列被拒绝 shape=%s", " | ".join(shape))
+            raise
         reason = "CHOICES_FORMAT"
         finish = None
         choices_count = 0

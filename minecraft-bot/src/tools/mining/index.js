@@ -40,6 +40,8 @@ function registerMining(registry) {
       ensure(!/air$|water|lava|bedrock|chest|barrel|furnace|shulker|spawner|crafting_table/.test(block.name), 'PROTECTED_BLOCK', '该方块不允许通过基础挖掘工具破坏。');
       const floor = bot.entity.position.floored();
       ensure(!(floor.x === a.position.x && floor.z === a.position.z && floor.y - 1 === a.position.y), 'UNSAFE_TARGET', '不能挖掘 Bot 脚下的支撑方块。');
+      const nearFloor = Math.max(Math.abs(a.position.x - floor.x), Math.abs(a.position.z - floor.z)) <= 1;
+      ensure(!(nearFloor && a.position.y < floor.y), 'UNSAFE_TARGET', '目标在 Bot 脚边下方，挖掉可能把自己困在坑里；先退后或换站位。');
       ensure(block.hardness >= 0 && typeof block.canHarvest === 'function', 'NOT_DIGGABLE', '方块无法安全挖掘。');
       if (a.tool_name) {
         const selected = items(bot).find((item) => item.name === a.tool_name);

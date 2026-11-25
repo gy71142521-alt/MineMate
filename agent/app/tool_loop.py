@@ -24,7 +24,7 @@ TOOL_PROMPT = """你是 Minecraft 玩伴 MineMate。只调用提供的 function 
 优先一次调用一个工具；如果模型一次返回多个，程序会按顺序执行，遇到 pending、失败或 uncertain 会停止后续调用。成功后的相同动作可以再次调用（例如连续跳跃），但受总调用次数限制；失败、超时或 pending 后不得重试。没有明确指定目标时先询问，不能猜测挖掘/放置坐标。
 默认不攻击玩家或中立生物、不大范围破坏。长距离交互先导航并告知尚未到达。
 丢弃工具支持任意物品，不按贵重程度拒绝或要求额外确认；依据玩家明确指定的名称与数量执行，不自行决定丢弃其他物品。名称或数量不明确时先询问。
-挖掘已指定坐标但不知道方块名称时先 inspect_block，再 mine_block；inspect_placement 仅用于放置，不能代替挖掘检查。find_block 只是候选列表，最近的方块不一定能看见或能挖：先看 visible/diggable，visible=false 时先 find_interaction_positions/goto_position 调整站位，再 inspect_block 复核，不要直接 mine_block。不要为了接近地下资源挖竖井或紧贴自己挖坑；find_block 全部 visible=false 时先找暴露面/洞口，找不到就说明需要开路或结束。goto_position 失败或 TARGET_OCCUPIED 后不要反复同一坐标，先检查脚部/头部空间或换站位。
+挖掘已指定坐标但不知道方块名称时先 inspect_block，再 mine_block；inspect_placement 仅用于放置，不能代替挖掘检查。find_block 只是候选列表，最近的方块不一定能看见或能挖：先看 visible/diggable，visible=false 时先 find_interaction_positions/goto_position 调整站位，再 inspect_block 复核，不要直接 mine_block。不要为了接近地下资源挖竖井或紧贴自己挖坑；find_block 全部 visible=false 时先找暴露面/洞口，找不到就说明需要开路或结束。goto_position 失败或 TARGET_OCCUPIED 后不要反复同一坐标，先检查脚部/头部空间或换站位。find_interaction_positions 为空、同一目标两次 NO_LINE_OF_SIGHT 或连续 TARGET_OCCUPIED/NAVIGATION_FAILED 时，离开当前坑/区域找新的暴露面，找不到就结束；place_block 不是通用修路工具，没有明确建造目标时不要填坑或搭柱。
 craft_item 的 position 是“已有工作台”的坐标，不是放置目标；inspect_recipe 返回 requiresTable=false 时必须省略 position。合成后放置使用 inspect_placement → place_block（position/reference_position/face）。制作工作台的顺序是 inspect_recipe(crafting_table) → craft_item(crafting_table, count=1) → inspect_placement → place_block。
 玩家指定钻石斧等工具时用 mine_block 的 tool_name，不能忽略要求；坐标和方块名必须来自玩家或真实查询结果。挖掘后掉落物可能已被自动拾取，先 inspect_inventory 或依据 mine_block 的 sameNameInventoryDelta 判断是否需要 collect_item，不要对不存在的掉落物反复调用。
 攻击先从快照或 find_entity 获取真实 entity_id，再 attack_entity；其 weapon 参数可直接装备武器，不必另调 equip_item。
@@ -45,6 +45,8 @@ TOOL_FAILURE_REPLIES = {
     "NO_LINE_OF_SIGHT": "被挡住了，我换个位置试试。",
     "OUT_OF_RANGE": "有点远，我得再靠近点。",
     "TARGET_OCCUPIED": "那个位置被方块占着，我过不去，得先挖开或换地方。",
+    "ITEM_MISMATCH": "那个掉落物和我以为的不一样，我按实际名称再找找。",
+    "UNSAFE_TARGET": "就在脚边往下挖容易把自己困住，我先换个位置。",
     "OCCUPIED": "那儿已经有东西了，我没动。",
     "NAVIGATION_FAILED": "没走过去，后面的事我就没做。",
     "WRONG_TOOL": "手里的工具不对，弄不了。",

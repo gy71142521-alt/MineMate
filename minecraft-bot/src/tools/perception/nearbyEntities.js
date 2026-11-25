@@ -25,6 +25,8 @@ function readNearbyEntities(bot, ready, radius, maximum) {
     const distance = Math.hypot(dx, dy, dz);
     if (distance > radius) continue;
 
+    let dropped = null;
+    try { dropped = entity.getDroppedItem?.() ?? null; } catch { dropped = null; }
     candidates.push({
       id: Number.isFinite(entity.id) ? entity.id : Number(id),
       name: entity.username || entity.name || entity.displayName || 'unknown',
@@ -33,7 +35,8 @@ function readNearbyEntities(bot, ready, radius, maximum) {
       position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
       distance,
       isPlayer: entity.type === 'player',
-      valid: true
+      valid: true,
+      ...(dropped?.name ? { itemName: dropped.name, itemCount: dropped.count ?? 1 } : {})
     });
   }
   candidates.sort((a, b) => a.distance - b.distance || a.id - b.id);

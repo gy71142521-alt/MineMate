@@ -128,6 +128,18 @@ test('附近实体分类、距离采用三维欧几里得值并排除自身、�
   assert.ok(result.items.every((entity) => entity.valid && entity.id !== bot.entity.id));
 });
 
+test('掉落物实体带实际物品名和数量，避免模型只看到 item', (t) => {
+  const { bot, perception } = setup(t);
+  const item = addEntity(bot, { id: 8, type: 'other', name: 'item', position: [1, 64, 0] });
+  item.getDroppedItem = () => ({ name: 'cobblestone', count: 1 });
+  const entities = perception.getNearbyEntities().items;
+  assert.equal(entities[0].name, 'item');
+  assert.equal(entities[0].itemName, 'cobblestone');
+  assert.equal(entities[0].itemCount, 1);
+  item.getDroppedItem = () => { throw new Error('dropped item unavailable'); };
+  assert.doesNotThrow(() => perception.getNearbyEntities());
+});
+
 test('实体结果按最近距离排序、受数量上限约束并标记截断', (t) => {
   const { bot, perception } = setup(t, { config: { maxEntities: 2 } });
   addEntity(bot, { id: 2, type: 'player', username: 'Near', position: [1.5, 64, 0.5] });

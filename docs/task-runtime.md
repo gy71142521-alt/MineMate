@@ -71,7 +71,9 @@ Node 聊天
 - `pending` 也不会结束，模型可以调用 `get_movement_task` 等查询；
 - `uncertain` 作为不确定结果回填，模型可以查询或调整计划；
 - 相同工具+参数+错误重复超过 `TASK_MAX_SAME_ERROR` 时，不再执行该动作，回填 `REPEATED_FAILURE`；
-- 连续错误达到阈值会追加编排器提示，要求换方案/改计划/结束。
+- 连续错误/导航失败达到阈值会追加编排器提示，但提示只在整个工具批次结束后追加，不能插在 assistant tool_calls 与 tool 结果之间；否则 OpenAI 兼容接口会拒绝整次请求；
+- 同一工具（例如 `collect_item`）累计失败/`uncertain` 3 次会追加提示，累计 5 次会兜底结束，避免“失败→查库存→再失败”的交叉循环；
+- 发送前还有工具协议检查：缺失的 tool result 会补一条失败结果并记录 warning，避免上下文恢复或分支遗漏造成 400。
 
 模型可调用 `update_plan` 替换剩余步骤，Harness 校验后追加新计划上下文。
 

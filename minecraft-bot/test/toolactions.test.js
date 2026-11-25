@@ -124,6 +124,21 @@ test('拾取须验证背包增量；实体消失不能假定拾取成功；取�
   assert.equal((await f.run('collect_item', { item_name: 'stone' })).error.code, 'ITEM_ENTITY_MISSING');
 });
 
+test('指定实体名称不匹配时报告实际物品，不假装范围内没有掉落物', async () => {
+  const f = fixture();
+  f.bot.entities[2] = { id: 2, isValid: true, position: new Vec3(1, 64, 0), getDroppedItem: () => ({ name: 'stone', count: 1 }) };
+  const result = await f.run('collect_item', { item_name: 'cobblestone', entity_id: 2 });
+  assert.equal(result.error.code, 'ITEM_MISMATCH');
+  assert.match(result.error.message, /stone/);
+});
+
+test('脚边下方的方块会被拒绝挖掘，避免制造无法拾取的坑', async () => {
+  const f = fixture();
+  f.setBlock('stone', new Vec3(1, 63, 0));
+  const result = await f.run('mine_block', { block_name: 'stone', position: { x: 1, y: 63, z: 0 } });
+  assert.equal(result.error.code, 'UNSAFE_TARGET');
+});
+
 test('实体查找使用三维距离并排除自身、无效对象和超过数量上限的实体', async () => {
   const f = fixture();
   f.bot.entities[2] = { id: 2, isValid: true, name: 'zombie', type: 'mob', position: new Vec3(1, 64, 0) };

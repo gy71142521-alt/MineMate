@@ -468,6 +468,42 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reply"], "好，先停了。")
         self.assertTrue(any("[玩家插话]" in str(message.get("content", "")) for message in fake.seen[1]))
 
+    async def test_same_tool_failing_across_batches_is_bounded(self):
+        runtime, llm, client = self.runtime(task_max_same_error=5, task_max_steps=10)
+        client.execute.return_value = {"success": False, "tool": "demo", "data": None,
+                                       "error": {"code": "ITEM_ENTITY_MISSING", "message": "missing"}}
+        llm.tool_completion.return_value = {"tool_calls": [tool_call("demo")]}
+        result = await runtime.run(MessageRequest(player="Steve", message="执行"))
+        self.assertIn("先停", result["reply"])
+        self.assertLessEqual(client.execute.await_count, 5)
+
+    async def test_error_nudge_does_not_split_a_multi_tool_batch(self):
+        runtime, llm, client = self.runtime()
+        client.execute.return_value = {"success": False, "tool": "demo", "data": None,
+                                       "error": {"code": "OUT_OF_RANGE", "message": "太远"}}
+        llm.tool_completion.side_effect = [
+            {"tool_calls": [tool_call("demo", identity=f"e{i}") for i in range(4)]},
+            {"tool_calls": [finish_call("先停一下。", status="partial")]},
+        ]
+        await runtime.run(MessageRequest(player="Steve", message="执行"))
+        seen = llm.tool_completion.call_args_list[-1].args[0]
+        start = next(i for i, message in enumerate(seen)
+                     if message.get("role") == "assistant" and len(message.get("tool_calls", [])) == 4)
+        self.assertEqual([message.get("role") for message in seen[start + 1:start + 5]], ["tool"] * 4)
+        self.assertEqual(seen[start + 5].get("role"), "user")
+
+    async def test_missing_tool_result_is_repaired_before_provider_call(self):
+        messages = [
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "demo", "arguments": "{}"}},
+                {"id": "b", "type": "function", "function": {"name": "demo", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "a", "content": "{}"},
+        ]
+        RuntimeState  # keep import used by test module
+        AgentRuntime._ensure_tool_protocol(messages)
+        self.assertEqual([m.get("tool_call_id") for m in messages if m.get("role") == "tool"], ["a", "b"])
+
     async def test_steering_is_rejected_without_active_turn(self):
         runtime, _, _ = self.runtime()
         self.assertFalse(runtime.steer("Steve", "停下"))

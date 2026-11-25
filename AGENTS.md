@@ -173,4 +173,7 @@ Python Agent 和 Node.js 游戏控制层通过 HTTP 通信。
 - `finish_task`/`update_plan` 是 Python 控制工具，不进入 Node 注册表；Node 仍是游戏工具 Schema 唯一来源。Skill 目录和 `TaskManager` 不受该运行时改造影响。
 - Node 的 `AGENT_TIMEOUT_MS` 必须大于等于 Python `TASK_TIMEOUT`；修改超时需同时重启两端。新增控制工具/兜底策略必须补 `agent/test/test_runtime.py` 或对应测试。
 - 运行中插话通过 `POST /api/agent/steer` 进入当前 turn 的 next-step 队列，在工具批次结算后作为 `user/message` 插入；不得在工具执行中途插入，也不得由 Harness 解析“停止/换目标”。模型看到插话后自行选择 `stop_movement`/`update_plan`/`finish_task`；固定 `停止` 仍是优先 abort 的旧指令路径。插话写入当前 turn 记忆，但队列是单进程内存，不提供跨重启持久保证。
+- 工具批次中不得在 assistant `tool_calls` 与对应 `tool` 结果之间插入 user/system 提示；错误/导航提示必须等整批结果写回后追加。发送模型前必须保证每个 tool_call 都有 tool result；缺失时补 `MISSING_TOOL_RESULT` 并记录 warning，避免 OpenAI 兼容接口因协议不完整返回 400。
+- 同一工具累计失败/`uncertain` 3 次必须提示模型核对真实状态，累计 5 次必须兜底结束；不能因为中间穿插了成功的只读查询就无限重试同一拾取/导航动作。
+- 拾取工具必须优先使用 `nearby_entities` 暴露的真实 `itemName`/`itemCount`；指定 `entity_id` 但名称不符返回 `ITEM_MISMATCH`。工具本身不得用“无限等待”替代可操作失败。
 - 自然语言 Runtime 通过 Python 控制工具 `execute_skill` 动态读取 `SkillRegistry`，再复用现有 `SkillManager`/`TaskManager` 执行已注册 Skill；Skill 的参数、底层 Node 工具和独立核验仍是唯一权威来源。模型可以选择 Skill，但不得把 Skill 当作 Node 工具或绕过注册表；Skill 执行结果（含 verification、steps 和真实错误）必须回填后才能继续或 `finish_task`。Runtime 取消、超时和客户端断开时必须取消在途 Skill，释放共享租约。
