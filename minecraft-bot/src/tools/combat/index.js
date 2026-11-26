@@ -1,11 +1,15 @@
-const { object, text, number } = require('../schema');
+const { object, text, number, describe } = require('../schema');
 const { ensure, distance, plainPosition, itemByName, usable, state } = require('../common');
 const { validEntity } = require('./helpers');
 // 保守白名单排除玩家和有条件敌对的中立生物。
 const HOSTILE = new Set(['zombie', 'skeleton', 'creeper', 'husk', 'drowned', 'stray', 'wither_skeleton', 'silverfish', 'endermite', 'blaze', 'magma_cube', 'slime', 'ghast', 'guardian', 'elder_guardian', 'phantom', 'shulker', 'pillager', 'vindicator', 'evoker', 'ravager', 'zoglin', 'piglin_brute', 'warden']);
 function registerCombat(registry) {
   registry.register({ name: 'find_entity', description: '有限半径查找指定类型实体，不包含 Bot 自身。', mutates: false,
-    parameters: object({ entity_type: text, radius: number(1, 16), max_results: number(1, 16, true) }, ['entity_type']),
+    parameters: object({
+      entity_type: describe(text, '要查找的实体类型名称，例如 zombie、cow、player；必须是当前运行时 registry 中的真实名称。'),
+      radius: describe(number(1, 16), '搜索半径，单位格；默认 16。'),
+      max_results: describe(number(1, 16, true), '最多返回多少个实体；默认 16。'),
+    }, ['entity_type']),
     execute({ bot }, a) {
       const all = Object.values(bot.entities).filter((entity) => validEntity(bot, entity, a.radius ?? 16) && (entity.name === a.entity_type || entity.type === a.entity_type))
         .map((entity) => ({ id: entity.id, name: entity.username ?? entity.name, type: entity.type, position: plainPosition(entity.position), distance: distance(bot.entity.position, entity.position), valid: true }))
@@ -15,7 +19,12 @@ function registerCombat(registry) {
     }
   });
   registry.register({ name: 'attack_entity', description: '仅攻击白名单敌对生物，最多 3 次，不追击；未确认击杀不宣称死亡。',
-    parameters: object({ entity_id: number(0, 2147483647, true), weapon: text, max_distance: number(1, 3), max_hits: number(1, 3, true) }, ['entity_id']),
+    parameters: object({
+      entity_id: describe(number(0, 2147483647, true), 'find_entity 或快照中返回的真实实体 ID；不能猜。'),
+      weapon: describe(text, '可选：攻击时装备的武器名称；省略则使用当前手持物品。'),
+      max_distance: describe(number(1, 3), '允许攻击的最大距离，单位格；默认 3。'),
+      max_hits: describe(number(1, 3, true), '最多攻击次数，默认 1；不追击，未确认击杀不能宣称死亡。'),
+    }, ['entity_id']),
     async execute(ctx, a) {
       const { bot } = ctx, entity = bot.entities[a.entity_id], radius = a.max_distance ?? 3;
       ensure(validEntity(bot, entity, radius), 'ENTITY_MISSING', '目标失效或超出攻击范围。');

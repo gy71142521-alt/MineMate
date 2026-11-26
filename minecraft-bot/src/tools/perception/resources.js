@@ -82,8 +82,8 @@ function registerResourceTools(registry) {
     parameters: {
       type: 'object',
       properties: {
-        query: { type: 'string', minLength: 1, maxLength: 64 },
-        kind: { type: 'string', enum: ['item', 'block', 'entity', 'any'] }
+        query: { type: 'string', minLength: 1, maxLength: 64, description: '从玩家原话提取的目标名称或短语，例如 橡木、cow、iron_ore。' },
+        kind: { type: 'string', enum: ['item', 'block', 'entity', 'any'], description: '要解析的资源类型：item 物品、block 方块、entity 实体、any 仅物品和方块。' }
       },
       required: ['query', 'kind'],
       additionalProperties: false

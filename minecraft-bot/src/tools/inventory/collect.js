@@ -1,9 +1,13 @@
-const { object, text, number } = require('../schema');
+const { object, text, number, describe } = require('../schema');
 const { ensure, distance, count, state } = require('../common');
 const { goals: { GoalNear } } = require('mineflayer-pathfinder');
 module.exports = function registerCollect(registry) {
   registry.register({ name: 'collect_item', description: '在 8 格内拾取指定物品实体；不挖掘，必须确认背包增量。',
-    parameters: object({ item_name: text, radius: number(1, 8), entity_id: number(0, 2147483647, true) }, ['item_name']),
+    parameters: object({
+      item_name: describe(text, '掉落物的真实物品名称，例如 cobblestone、oak_log；优先用 nearby_entities.itemName。'),
+      radius: describe(number(1, 8), '拾取搜索半径（1-8 格，默认 8）。'),
+      entity_id: describe(number(0, 2147483647, true), '可选：nearby_entities 返回的掉落物实体 ID；指定时必须与 item_name 匹配。'),
+    }, ['item_name']),
     async execute(ctx, a) {
       const { bot } = ctx;
       const all = Object.values(bot.entities).filter((entity) => entity?.isValid && entity.position);

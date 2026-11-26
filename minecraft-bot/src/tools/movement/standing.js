@@ -1,4 +1,4 @@
-const { object, position, number } = require('../schema');
+const { object, position, number, describe } = require('../schema');
 const { ensure, vector, distance, plainPosition, state } = require('../common');
 
 const hazard = /lava|water|fire|cactus|magma|campfire|berry_bush|powder_snow|portal/;
@@ -7,7 +7,11 @@ const air = (block) => block && ['air', 'cave_air', 'void_air'].includes(block.n
 // 有界地形/射线查询，不临时移动实体、不转头、不设置路径。候选站位不等于可达路径。
 module.exports = function registerStanding(registry) {
   registry.register({ name: 'find_interaction_positions', description: '只读查找目标周围可站立且视线通畅的候选脚部坐标，不自动移动、不保证路径可达。导航后必须重新检查距离与视线；不能挖候选脚下支撑。', mutates: false,
-    parameters: object({ position, radius: number(1, 4, true), max_results: number(1, 16, true) }, ['position']),
+    parameters: object({
+      position: describe(position, '要接近/交互的目标方块整数坐标 {x,y,z}。'),
+      radius: describe(number(1, 4, true), '目标周围候选站位搜索半径（1-4 格，默认 3）。'),
+      max_results: describe(number(1, 16, true), '最多返回候选站位数（1-16，默认 16）；候选不保证路径可达。'),
+    }, ['position']),
     execute(ctx, a) {
       const { bot } = ctx;
       const origin = vector(a.position), center = origin.offset(0.5, 0.5, 0.5);

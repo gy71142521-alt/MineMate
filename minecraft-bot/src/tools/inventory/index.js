@@ -1,4 +1,4 @@
-const { object, text, number } = require('../schema');
+const { object, text, number, describe } = require('../schema');
 const { ensure, count, itemByName, items, state } = require('../common');
 const { validEntity } = require('../combat/helpers');
 // 与当前 Mineflayer consume 的原版满饥饿食用例外保持一致。
@@ -16,7 +16,10 @@ async function consume(ctx, name) {
 }
 function registerInventory(registry) {
   registry.register({ name: 'equip_item', description: '装备指定背包物品并验证装备槽。',
-    parameters: object({ item_name: text, destination: { type: 'string', enum: ['hand', 'off-hand', 'head', 'torso', 'legs', 'feet'] } }),
+    parameters: object({
+      item_name: describe(text, '要装备的背包物品真实名称。'),
+      destination: describe({ type: 'string', enum: ['hand', 'off-hand', 'head', 'torso', 'legs', 'feet'] }, '目标装备槽；例如手持用 hand，头盔用 head，护甲分别用 torso/legs/feet。'),
+    }),
     async execute(ctx, a) {
       const item = itemByName(ctx.bot, a.item_name);
       await ctx.step(() => ctx.bot.equip(item, a.destination));
@@ -24,9 +27,12 @@ function registerInventory(registry) {
       return state(actual?.name === a.item_name ? 'completed' : 'uncertain', { destination: a.destination, actualItem: actual?.name ?? null });
     }
   });
-  registry.register({ name: 'consume_item', description: '食用指定已知食物或牛奶；金苹果/附魔金苹果允许满饥饿食用，使用后验证数量变化。', parameters: object({ item_name: text }), execute: (ctx, a) => consume(ctx, a.item_name) });
+  registry.register({ name: 'consume_item', description: '食用指定已知食物或牛奶；金苹果/附魔金苹果允许满饥饿食用，使用后验证数量变化。', parameters: object({ item_name: describe(text, '要食用的食物/牛奶/蜂蜜真实名称；必须是当前背包中的已知可食用物品。') }), execute: (ctx, a) => consume(ctx, a.item_name) });
   registry.register({ name: 'drop_item', description: '按明确指定的物品名称和数量丢弃任意背包物品，包含钻石及附魔装备，不判断价值；单次 1–16 个，允许丢完指定物品。',
-    parameters: object({ item_name: text, count: number(1, 16, true) }),
+    parameters: object({
+      item_name: describe(text, '要丢弃的背包物品真实名称；允许钻石、附魔装备及最后一件。'),
+      count: describe(number(1, 16, true), '本次丢弃数量（1-16，必须不超过当前持有数量）。'),
+    }),
     async execute(ctx, a) {
       const item = itemByName(ctx.bot, a.item_name), before = count(ctx.bot, a.item_name);
       ensure(before >= a.count, 'INSUFFICIENT_ITEMS', '物品数量不足。');
@@ -36,7 +42,10 @@ function registerInventory(registry) {
     }
   });
   registry.register({ name: 'use_item', description: '按类型使用食物/牛奶、短暂举盾或对指定羊使用剪刀；其他道具拒绝执行。',
-    parameters: object({ item_name: text, entity_id: number(0, 2147483647, true) }, ['item_name']),
+    parameters: object({
+      item_name: describe(text, '要使用的物品真实名称；支持食物/牛奶、盾牌、剪刀等已适配类型。'),
+      entity_id: describe(number(0, 2147483647, true), '可选：对指定实体使用（例如给羊剪毛）时必须提供真实实体 ID。'),
+    }, ['item_name']),
     async execute(ctx, a) {
       const { bot } = ctx;
       if (bot.registry.foodsByName?.[a.item_name] || ['milk_bucket', 'honey_bottle'].includes(a.item_name)) return consume(ctx, a.item_name);

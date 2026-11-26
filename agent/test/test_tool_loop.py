@@ -566,7 +566,9 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
         for name in ("furnace_add_input", "furnace_add_fuel", "furnace_take_output"):
             self.assertIn(name, catalog)
             schema = catalog[name]["parameters"]
-            self.assertEqual(schema["properties"]["count"], {"type": "integer", "minimum": 1, "maximum": 64})
+            self.assertEqual({key: schema["properties"]["count"][key] for key in ("type", "minimum", "maximum")},
+                             {"type": "integer", "minimum": 1, "maximum": 64})
+            self.assertIsInstance(schema["properties"]["count"].get("description"), str)
             args = {"position": {"x": 1, "y": 64, "z": 0}, "count": 64}
             if name != "furnace_add_fuel":
                 args["item_name"] = "raw_iron" if name == "furnace_add_input" else "iron_ingot"
@@ -576,7 +578,8 @@ class ToolLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("jump", catalog)
         for name in ["set_sprint", "set_sneak"]:
             schema = catalog[name]["parameters"]
-            self.assertEqual(schema["properties"]["enabled"], {"type": "boolean"})
+            self.assertEqual(schema["properties"]["enabled"]["type"], "boolean")
+            self.assertIsInstance(schema["properties"]["enabled"].get("description"), str)
             self.assertTrue(validate(schema, {"enabled": True}))
             self.assertTrue(validate(schema, {"enabled": False}))
             self.assertFalse(validate(schema, {"enabled": 1}))

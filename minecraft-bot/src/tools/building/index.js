@@ -1,7 +1,12 @@
-const { object, text, position } = require('../schema');
+const { object, text, position, describe } = require('../schema');
 const { ensure, blockAt, vector, itemByName, state } = require('../common');
 const FACES = Object.freeze({ up: [0, 1, 0], down: [0, -1, 0], north: [0, 0, -1], south: [0, 0, 1], east: [1, 0, 0], west: [-1, 0, 0] });
-const parameters = object({ block_name: text, position, reference_position: position, face: { type: 'string', enum: Object.keys(FACES) } });
+const parameters = object({
+  block_name: describe(text, '要放置的方块真实名称，必须当前背包中有对应物品。'),
+  position: describe(position, '要放置到的目标整数坐标 {x,y,z}；必须是空气，不能覆盖现有方块。'),
+  reference_position: describe(position, '用于定位放置面的参照方块整数坐标；必须与 position 相邻并位于 face 方向。'),
+  face: describe({ type: 'string', enum: Object.keys(FACES) }, '参照方块的哪个面朝向目标：up/down/north/south/east/west。'),
+});
 function inspect(ctx, a) {
   ensure(ctx.bot.registry.blocksByName[a.block_name], 'UNKNOWN_BLOCK', '指定名称不是当前版本的方块。');
   const target = blockAt(ctx, a.position);

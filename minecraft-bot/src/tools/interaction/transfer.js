@@ -1,9 +1,14 @@
-const { object, text, number, position } = require('../schema');
+const { object, text, number, position, describe } = require('../schema');
 const { ensure, count, state } = require('../common');
 const { interact } = require('./index');
 function registerTransfer(registry) {
   registry.register({ name: 'transfer_item', description: '在指定箱子或木桶中存入/取出最多 16 个物品，验证背包和容器双方增减。',
-    parameters: object({ position, direction: { type: 'string', enum: ['deposit', 'withdraw'] }, item_name: text, count: number(1, 16, true) }),
+    parameters: object({
+      position: describe(position, '目标箱子/木桶的整数方块坐标。'),
+      direction: describe({ type: 'string', enum: ['deposit', 'withdraw'] }, 'deposit=从背包存入容器，withdraw=从容器取回背包。'),
+      item_name: describe(text, '要存入或取出的物品真实名称。'),
+      count: describe(number(1, 16, true), '本次转移数量（1-16）。'),
+    }),
     execute(ctx, a) {
       return interact(ctx, a.position, 'container', async (window) => {
         const { bot } = ctx, type = bot.registry.itemsByName[a.item_name]?.id;

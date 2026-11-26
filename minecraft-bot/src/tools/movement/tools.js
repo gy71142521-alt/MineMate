@@ -1,4 +1,4 @@
-const { object } = require('../schema');
+const { object, describe } = require('../schema');
 const { ensure, state } = require('../common');
 
 module.exports = function registerMovementControls(registry) {
@@ -6,7 +6,7 @@ module.exports = function registerMovementControls(registry) {
     ['set_sprint', 'setSprint', '设置跑步许可 enabled（布尔值）。不会自己向前走；可与跟随/导航组合，寻路器只在安全路段跑步。潜行时暂时禁止跑步。'],
     ['set_sneak', 'setSneak', '开启/关闭持续潜行 enabled（布尔值），可与跟随/导航组合。关闭后恢复先前跑步设置；停止、失败、死亡或断线会清理模式。']
   ]) {
-    registry.register({ name, description, parameters: object({ enabled: { type: 'boolean' } }), movement: true, control: true,
+    registry.register({ name, description, parameters: object({ enabled: describe({ type: 'boolean' }, 'true 开启该移动模式，false 关闭；不会自己向前走。') }), movement: true, control: true,
       execute: ({ movement, username }, { enabled }) => {
         const result = movement[method](username, enabled);
         ensure(result?.ok, 'MOVEMENT_REJECTED', result?.message ?? '移动模式被拒绝。');
