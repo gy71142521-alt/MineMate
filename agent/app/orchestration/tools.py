@@ -7,6 +7,7 @@ Minecraft. Node remains the only source for game tool schemas.
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 
 
 def skill_first_toolset(node_tools: list[dict], skill_definitions: list[dict]) -> tuple[list[dict], dict[str, str]]:
@@ -30,6 +31,11 @@ def skill_first_toolset(node_tools: list[dict], skill_definitions: list[dict]) -
         "furnace_add_input": ("smelt_item", "整体熔炼目标优先 execute_skill(skill=smelt_item)；本工具仅用于独立添加/补充指定熔炉的原料。"),
         "furnace_add_fuel": ("smelt_item", "整体熔炼目标优先 execute_skill(skill=smelt_item)；本工具仅用于独立添加/补充指定熔炉的燃料。"),
     }
+    if "mine_vein" in names:
+        # 专用矿脉执行入口交给 Skill 管理统一预算，避免模型自行拆开绕过限制。
+        for name in ("inspect_mining_route", "mine_route_block", "mine_vein_block"):
+            replacements[name] = "mine_vein"
+        preferences["mine_block"] = ("mine_vein", "矿石/矿脉采集优先 execute_skill(skill=mine_vein)；木材、沙子等使用 gather_resource。此工具仅供玩家明确指定坐标的单块操作。")
     visible = []
     for original in node_tools:
         definition = deepcopy(original)
@@ -113,14 +119,14 @@ def execute_skill_tool(skill_definitions: list[dict]) -> dict:
     names = [item.get("name") for item in skill_definitions
              if isinstance(item, dict) and isinstance(item.get("name"), str)]
     details = "; ".join(
-        f"{item['name']}: {item.get('description', '')}; parameters={item.get('parameters', {})}"
+        f"{item['name']}: {item.get('description', '')}; parameters={json.dumps(item.get('parameters', {}), ensure_ascii=False, separators=(',', ':'))}"
         for item in skill_definitions if isinstance(item, dict) and isinstance(item.get("name"), str)
     )
     return {
         "type": "function",
         "function": {
             "name": "execute_skill",
-            "description": "优先入口：搜索、采集、合成、熔炼目标应调用对应已注册 Skill，不要自行拼接其底层工具。Skill 会校验参数、调用真实 Node 工具并独立核验结果。缺材料或设施时按真实结果补前置步骤，再调用 Skill；不要绕回同名 Node 工具。可用 Skill：" + details[:6000],
+            "description": "优先入口：搜索、采集、合成、熔炼目标应调用对应已注册 Skill，不要自行拼接其底层工具。Skill 会校验参数、调用真实 Node 工具并独立核验结果。缺材料或设施时按真实结果补前置步骤，再调用 Skill；不要绕回同名 Node 工具。可用 Skill：" + details,
             "parameters": {
                 "type": "object",
                 "properties": {

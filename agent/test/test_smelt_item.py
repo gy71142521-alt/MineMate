@@ -186,7 +186,7 @@ class SmeltTests(unittest.IsolatedAsyncioTestCase):
         return [a for n, a in self.node.calls if n == name]
 
     async def test_registry_strict_parameters_and_position(self):
-        self.assertEqual(self.registry.list()[-1]["name"], "smelt_item")
+        self.assertIn("smelt_item", [s["name"] for s in self.registry.list()])
         for args in ({"count": 0}, {"count": 65}, {"count": True}, {"count": "3"}, {"search_radius": 17},
                      {"use_existing": "true"}, {"wait_timeout": 0}, {"wait_timeout": 1501},
                      {"furnace_position": {"x": 1, "y": 64, "z": True}}, {"shell": "run"}):

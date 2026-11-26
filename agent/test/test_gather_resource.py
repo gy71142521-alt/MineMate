@@ -33,6 +33,7 @@ class GatheringNode(MockNode):
         self.uncertain_mining = self.fake_removal = self.transport_lost = False
         self.mine_error = None
         self.blocked = self.no_stands = self.lie_arrival = False
+        self.pickup_blocked = self.item_entity_visible = False
         self.fail_navigation = False
         self.changed = False
         self.pending_drop = 0
@@ -62,6 +63,9 @@ class GatheringNode(MockNode):
             data.update(ambiguous=self.ambiguous, candidates=[{"kind": args["kind"], "name": resolved}])
         elif name == "inspect_mining_sources":
             data.update(available=self.source_available, sources=[] if self.source_mismatch or not self.source_available else [{"name": self.block_name}], truncated=False)
+        elif name == "nearby_entities":
+            data.update(available=True, truncated=False, items=([{"id": 900, "itemName": self.item_name,
+                "itemCount": 1, "position": {"x": 2, "y": 64, "z": 0}}] if self.item_entity_visible else []))
         elif name == "find_block":
             data.update(blocks=[{**copy.deepcopy(b), "distance": distance(self.location, b["position"])} for b in self.blocks
                                 if b["name"] == args["block_name"] and distance(self.location, b["position"]) <= args["radius"]], truncated=False)
@@ -76,6 +80,15 @@ class GatheringNode(MockNode):
             p = args["position"]
             data["candidates"] = [] if self.no_stands else [{"position": {"x": p["x"] - 2, "y": p["y"], "z": p["z"]}},
                                                            {"position": {"x": p["x"], "y": p["y"], "z": p["z"] - 2}}]
+        elif name == "clear_path":
+            if self.blocked:
+                self.blocked = False
+                data.update(cleared=1, clearedBlocks=[{"name": "stone", "position": args["position"]}], remainingBlocked=False)
+            elif self.pickup_blocked:
+                self.pickup_blocked = False
+                data.update(cleared=1, clearedBlocks=[{"name": "stone", "position": args["position"]}], remainingBlocked=False)
+            else:
+                data.update(cleared=0, clearedBlocks=[], remainingBlocked=False)
         elif name == "goto_position":
             if self.fail_navigation:
                 fail("NAVIGATION_FAILED")
@@ -140,7 +153,7 @@ class GatherTests(unittest.IsolatedAsyncioTestCase):
         return [name for name, _ in self.node.calls]
 
     async def test_registry_and_strict_parameters(self):
-        self.assertEqual([s["name"] for s in self.registry.list()], ["explore_and_find", "gather_resource", "craft_item", "smelt_item"])
+        self.assertEqual([s["name"] for s in self.registry.list()], ["explore_and_find", "gather_resource", "craft_item", "smelt_item", "mine_vein"])
         for args in ({"count": 0}, {"count": 257}, {"count": True}, {"count": "2"}, {"search_radius": 17},
                      {"max_blocks": 65}, {"resource": "\n"}, {"block_name": ""}, {"shell": "run"}):
             with self.subTest(args=args), self.assertRaises(LLMError):
@@ -285,6 +298,23 @@ class GatherTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["success"])
         self.assertNotIn("mine_block", self.names())
 
+    async def test_line_of_sight_failure_clears_path_and_retries_target(self):
+        self.node.blocked = True
+        result = await self.finish({"count": 1})
+        self.assertTrue(result["success"], result)
+        self.assertIn("clear_path", self.names())
+        self.assertEqual(self.names().count("mine_block"), 1)
+        self.assertEqual(result["data"]["cleared_blocks"], 1)
+
+    async def test_pickup_path_is_cleared_before_collecting_visible_drop(self):
+        self.node.item_entity_visible = True
+        self.node.pickup_blocked = True
+        result = await self.finish({"count": 1})
+        self.assertTrue(result["success"], result)
+        names = self.names()
+        self.assertLess(names.index("clear_path"), names.index("collect_item"))
+        self.assertEqual(result["data"]["cleared_blocks"], 1)
+
     async def test_attempt_budget_and_call_budget_are_bounded(self):
         result = await self.finish({"count": 4, "max_blocks": 1})
         self.assertEqual(result["error"]["code"], "RESOURCE_INSUFFICIENT")
@@ -375,7 +405,10 @@ bot.pathfinder={goal:null,setGoal(goal){this.goal=goal;if(goal){bot.entity.posit
 let task,taskId=0;
 const movement={getState:()=>({type:'idle'}),stop:()=>({ok:true}),
  goTo:(who,x,y,z)=>{bot.entity.position=new Vec3(x,y,z);task={taskId:++taskId,status:'arrived'};return {ok:true,taskId};},getTask:()=>task};
-const perception={getWorldSnapshot:()=>({availability:{player:'available',inventory:'available'},
+const perception={getNearbyEntities:()=>({available:true,truncated:false,items:Object.values(bot.entities).filter(e=>e.isValid)
+ .map(e=>({id:e.id,itemName:e.getDroppedItem?.()?.name,itemCount:e.getDroppedItem?.()?.count??1,
+ position:{x:e.position.x,y:e.position.y,z:e.position.z}}))}),
+getWorldSnapshot:()=>({availability:{player:'available',inventory:'available'},
  player:{position:{x:bot.entity.position.x,y:bot.entity.position.y,z:bot.entity.position.z},alive:true,dimension:'overworld'},
  inventory:inventory.map((item,i)=>({...item,slot:i+9})),nearbyEntities:[],nearbyBlocks:[],timestamp:Date.now()})};
 bot.tools=createToolSystem(bot,{movement,perception,logger:{log(){},error(){}}});

@@ -269,7 +269,10 @@ class TaskManager:
                     record["task_id"], name, request_id, result["success"], data.get("status"), error_code,
                     int((time.monotonic() - call_started) * 1000))
         if not result["success"] or data.get("status") in ("uncertain", "failed", "cancelled"):
-            uncertain = data.get("status") == "uncertain" or error_code in ("TIMEOUT", "EXECUTION_FAILED", "CANCELLED")
+            # 只读诊断工具失败不会造成未确认副作用；允许 Skill 回退到名称搜索或背包核验。
+            # 修改工具的 EXECUTION_FAILED 仍必须按 uncertain 处理，禁止盲目重发。
+            uncertain = data.get("status") == "uncertain" or error_code in ("TIMEOUT", "CANCELLED") or (
+                error_code == "EXECUTION_FAILED" and catalog[name].get("mutates", True))
             entry["status"] = "uncertain" if uncertain else "failed"
             with suppress(LLMError, ExecutionError):
                 entry["after"] = evidence(await self._snapshot(record))

@@ -104,7 +104,7 @@ class ExploreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_production_catalog_and_strict_parameters(self):
         # 生产目录新增采集 Skill，原搜索 Skill 及其参数合同保持不变。
-        self.assertEqual([s["name"] for s in self.registry.list()], ["explore_and_find", "gather_resource", "craft_item", "smelt_item"])
+        self.assertEqual([s["name"] for s in self.registry.list()], ["explore_and_find", "gather_resource", "craft_item", "smelt_item", "mine_vein"])
         self.assertEqual(main.skill_registry.list(), self.registry.list())
         for args in ({"search_radius": 65}, {"search_radius": "16"}, {"max_waypoints": 9},
                      {"max_results": 9}, {"approach": 1}, {"target_kind": "item"}, {"target": "\n"},

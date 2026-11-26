@@ -32,6 +32,8 @@ Bot 已连接、已出生、存活，维度和背包可读；使用实际玩家�
 | tool_name | 可选，指定背包中要使用的工具；不指定时优先使用合适工具，没有工具且空手可采集才使用空手 |
 | search_radius | 默认 16，整数 1～16，以 Bot 当前采集位置为球心、每轮重新划定的三维目标范围 |
 | max_blocks | 默认 16，整数 1～64，最多尝试的不同方块数，包含跳过/失败候选 |
+| allow_clearing | 默认 true；允许有限清理 Bot 到采集目标/掉落实体的路径方块 |
+| max_clear_blocks | 默认 4，整数 1～8；整个 Skill 共用的清障预算 |
 
 名称先经 `resolve_resource` 确认。来源由只读 `inspect_mining_sources` 从当前运行时 drops 数据获取，支持 stone→cobblestone、iron_ore→raw_iron，不在 Python 枚举别名或掉落表。最多考虑 4 种来源方块；源数据不明确时不猜测挖掘。
 
@@ -70,6 +72,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-gather-skill.
 ```
 
 Node 自动给出铁矿石/深层铁矿石等可能来源，只搜索已加载范围，矿石不可达或没有镐时明确失败，不自动挖隧道或合成工具。
+
+不可达/视线遮挡时会用 `clear_path` 沿 Bot 到明确目标的有限直线清理少量天然方块，每次后重新检查；挖掘后拾取失败会先检查真实掉落实体位置，预算允许时先清障再拾取。此工具不会启用全局自动挖掘，也不清除液体、脚下支撑、矿石、功能方块或未知方块。
 
 以上流程通过 `/api/world` 读取真实快照；不会额外调用同名快照 Tool，也不会另开 Skill 执行槽。成功必须满足最终背包数量 ≥ count，且维度未变化；仅方块消失、实体消失或 Tool 返回成功均不够。
 

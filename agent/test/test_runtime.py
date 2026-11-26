@@ -160,7 +160,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         skills.submit.side_effect = submit
         runtime.skill_manager = skills
         definitions = {name: {**demo_definition(), "name": name}
-                       for name in ("craft_item", "find_block", "mine_block", "place_block", "follow_player")}
+                       for name in ("craft_item", "find_block", "mine_block", "place_block", "follow_player",
+                                    "inspect_mining_route", "mine_route_block", "mine_vein_block")}
         client.catalog.return_value = (definitions, 1)
         return runtime, llm, client, skills
 
@@ -170,6 +171,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             ("gather_resource", {"resource": "oak_log", "count": 4}),
             ("explore_and_find", {"target_kind": "block", "target": "crafting_table"}),
             ("smelt_item", {"item_name": "raw_iron", "count": 3}),
+            ("mine_vein", {"resource": "raw_iron", "count": 3}),
         ]
         for mode in ("direct", "plan"):
             for name, arguments in examples:
@@ -189,6 +191,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("craft_item", names)
                     self.assertNotIn("find_block", names)
                     self.assertIn("mine_block", names)  # 精确坐标挖掘仍可调用。
+                    for helper in ("inspect_mining_route", "mine_route_block", "mine_vein_block"):
+                        self.assertNotIn(helper, names)
+                    description = visible[0]["function"]["description"]
+                    for field in ('"seed_position"', '"vein_radius"', '"max_route_steps"'):
+                        self.assertIn(field, description)  # 第五个 Skill 的 Schema 不能被截断。
                     self.assertEqual(runtime.planner.decide.call_args.args[1], visible[:-2])
 
     async def test_old_memory_raw_craft_is_rejected_then_model_can_select_skill(self):

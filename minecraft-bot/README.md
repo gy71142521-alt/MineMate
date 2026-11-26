@@ -647,6 +647,11 @@ Task 002 移动与 Task 003 感知实现已迁入统一目录，旧导入路径�
 | 移动 | `jump` | `{}`；地面上单次跳跃，3 秒内观察起跳并落地才返回 completed |
 | 挖掘 | `find_block` | `block_name,radius?`（整数 1–16，默认 5）、`max_results?`（1–16，默认 8） |
 | 挖掘 | `mine_block` | `block_name,position,max_distance?`（1–4.5，默认 4.5）、`tool_name?`（如 diamond_axe）；仅明确指定的一个方块，不自动拾取 |
+| 挖掘 | `clear_path` | `position,max_blocks?`（1–8，默认 2）、`max_distance?`（1–8，默认 8）、`tool_name?`；仅清除有限直线路径上的允许天然方块，不开启全局自动挖掘 |
+| 矿脉 | `inspect_vein` | `position,block_name`；种子与六邻接暴露矿石查询 |
+| 矿脉 | `inspect_mining_route` | `position,block_name?,purpose?,radius?,max_clear_blocks?,tool_name?`；只读局部站位/通道搜索，最多512节点 |
+| 矿脉 | `mine_route_block` | 同上；重新规划并只挖下一块通道障碍 |
+| 矿脉 | `mine_vein_block` | `position,block_name,tool_name?`；额外核验液体、坠落物和可见表面，再单块挖掘 |
 | 物品 | `collect_item` | `item_name,radius?`（1–8，默认 8）、`entity_id?`；有限等待并验证背包增量 |
 | 建造 | `inspect_placement` | `block_name,position,reference_position,face`；只检查条件 |
 | 建造 | `place_block` | 同上；face 为 up/down/north/south/east/west，单个空位置，不能覆盖已有方块 |
@@ -671,7 +676,7 @@ Task 002 移动与 Task 003 感知实现已迁入统一目录，旧导入路径�
 
 向使用中的炉子追加原料/燃料请使用独立 `furnace_add_input/furnace_add_fuel`；它们的 completed 只表示本次物品转移已核验，不表示熔炼完成。`furnace_take_output` 可在加工中取出当前整栈，也能处理 64 个产品；背包须有足够容量，加工中保守预留一个完整输出栈的空间。不同工艺返回冲突，不自动清炉或选择其它炉子。燃料只接受共享适配器已定义且当前 registry 存在的物品，不声称支持任意模组燃料或所有原版可燃物。命令与边界见 [独立熔炉工具说明](../docs/tools-guide.md#103-添加补充与独立取出)。
 
-默认交互距离为 4.5 格，实体距离包含垂直高度。寻路依然 `canDig=false`，禁止为走路挖掘或搭方块；`mine_block` 是另行明确授权的单方块操作。挖掘检查名称、可见性、工具、耐久和采集条件，拒绝脚下支撑、储物方块及受保护类型。放置检查相邻支撑面、空位置、实体碰撞与背包。
+默认交互距离为 4.5 格，实体距离包含垂直高度。寻路依然 `canDig=false`，普通走路不会自动挖掘或搭方块；`mine_block` 是另行明确授权的单方块操作，采集 Skill 可在有限预算内调用 `clear_path` 清除天然阻挡并在每次后重新检查。挖掘检查名称、可见性、工具、耐久和采集条件，拒绝脚下支撑、储物方块及受保护类型。放置检查相邻支撑面、空位置、实体碰撞与背包。
 
 指定坐标但不知道方块名称时，可先 `inspect_block`，再用查询到的名称调用 `mine_block`；`inspect_placement` 仅用于放置检查，已有方块返回 OCCUPIED 并不表示该方块不可挖。玩家指定“使用钻石斧”时应传入 `tool_name=diamond_axe`，缺少工具或该工具无法采集时拒绝，不擅自换成其他工具。
 

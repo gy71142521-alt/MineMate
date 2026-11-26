@@ -139,6 +139,33 @@ test('脚边下方的方块会被拒绝挖掘，避免制造无法拾取的坑',
   assert.equal(result.error.code, 'UNSAFE_TARGET');
 });
 
+test('clear_path 只清除有限范围内的天然阻挡方块并返回清障账本', async () => {
+  const f = fixture();
+  f.setBlock('stone', new Vec3(2, 65, 0));
+  const result = await f.run('clear_path', { position: { x: 4, y: 65, z: 0 }, max_blocks: 1 });
+  assert.equal(result.success, true);
+  assert.equal(result.data.status, 'completed');
+  assert.equal(result.data.cleared, 1);
+  assert.deepEqual(result.data.clearedBlocks[0].position, { x: 2, y: 65, z: 0 });
+  assert.equal(f.bot.blockAt(new Vec3(2, 65, 0)).name, 'air');
+});
+
+test('clear_path 不会破坏保护方块或 Bot 脚下支撑', async () => {
+  const f = fixture();
+  f.setBlock('chest', new Vec3(2, 65, 0));
+  const protectedResult = await f.run('clear_path', { position: { x: 4, y: 65, z: 0 }, max_blocks: 1 });
+  assert.equal(protectedResult.success, true);
+  assert.equal(protectedResult.data.cleared, 0);
+  assert.equal(f.bot.blockAt(new Vec3(2, 65, 0)).name, 'chest');
+
+  const g = fixture();
+  g.setBlock('stone', new Vec3(1, 63, 0));
+  const supportResult = await g.run('clear_path', { position: { x: 4, y: 63, z: 0 }, max_blocks: 1 });
+  assert.equal(supportResult.success, true);
+  assert.equal(supportResult.data.cleared, 0);
+  assert.equal(g.bot.blockAt(new Vec3(1, 63, 0)).name, 'stone');
+});
+
 test('实体查找使用三维距离并排除自身、无效对象和超过数量上限的实体', async () => {
   const f = fixture();
   f.bot.entities[2] = { id: 2, isValid: true, name: 'zombie', type: 'mob', position: new Vec3(1, 64, 0) };

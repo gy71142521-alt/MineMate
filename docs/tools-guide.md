@@ -112,7 +112,7 @@
 
 **到达“附近”不保证已经能交互。** 后续挖掘/放置/攻击仍要通过实际距离和目标条件检查。当前没有独立注册的自由转头或“跳起来同时向脚下搭方块”工具。
 
-## 5. 方块查询与挖掘：4 个
+## 5. 方块查询与挖掘：9 个
 
 | 工具 | 参数示例 | 能做什么 | 范围与限制 |
 | --- | --- | --- | --- |
@@ -120,6 +120,11 @@
 | `find_block` | `{"block_name":"iron_ore","radius":8,"max_results":8}` | 在有限范围查找当前版本的指定方块 | radius 可选整数 1～16，默认 5；max_results 可选整数 1～16，默认 8；按距离排列已找到的候选，并返回 `visible`/`diggable`；最近候选不代表可见或可达，挖掘前仍需 inspect_block/调整站位 |
 | `inspect_mining_sources` | `{"item_name":"raw_iron","max_results":16}` | 从运行时 drops 查询可能的来源方块；可选 block_name 限定来源 | 只读，不扫描世界；max_results 1～16，默认 16。不是实际掉落保证，不考虑附魔/服务端数据包，须验证背包 |
 | `mine_block` | `{"block_name":"oak_log","position":{"x":10,"y":64,"z":8},"tool_name":"diamond_axe"}` | 挖掘一个明确坐标、明确名称的方块；可指定工具 | 可选 max_distance 为 1～4.5，默认 4.5；不自动导航、不自动拾取、不批量挖掘；Bot 脚下及紧邻脚边下方的方块会被拒绝，避免把自己困在坑里 |
+| `clear_path` | `{"position":{"x":10,"y":64,"z":8},"max_blocks":2}` | 为采集目标或掉落物有限清除当前直线路径上的天然阻挡方块 | max_blocks 为 1～8、默认 2；目标范围最多 8 格；只允许天然环境方块，不清除液体、矿石、功能方块、未知方块或脚下支撑；返回 `clearedBlocks` 和 `remainingBlocked` |
+| `inspect_vein` | `{"position":{"x":10,"y":64,"z":8},"block_name":"iron_ore"}` | 检查种子与六面相邻、已暴露的同类矿石 | 只读，目标16格内，固定最多7个位置，不遍历隐藏矿脉 |
+| `inspect_mining_route` | `{"position":{"x":10,"y":64,"z":8},"block_name":"iron_ore","purpose":"mine","max_clear_blocks":16}` | 读取地形，规划可挖掘通道，返回下一步 dig/move/ready 或不可达诊断 | purpose=mine/pickup；radius=1～16默认12，清障0～32默认16；最多512节点、相对起点上下4格；不改变世界 |
+| `mine_route_block` | 同 `inspect_mining_route` | 重新规划后挖当前第一块天然障碍，复用基础挖掘核验 | 只挖一块，不自动移动；不允许挖其它矿石/设施/危险地形 |
+| `mine_vein_block` | `{"position":{"x":10,"y":64,"z":8},"block_name":"iron_ore","tool_name":"iron_pickaxe"}` | 核验矿石风险与多个可见面，再复用基础挖掘 | 检查工具、液体邻接、坠落物和脚下支撑；用官方 raycast 挖掘面，不自动拾取 |
 
 挖掘前会检查名称是否变化、方块是否允许破坏、是否为脚下支撑、采集条件、工具耐久、距离、可挖性和视线。明确指定的工具不存在或不适用时会报错；未指定且当前手持不能采集时，会尝试从背包寻找可用工具。
 
@@ -127,7 +132,9 @@
 
 `mine_block` 观察目标变成空气后才返回 completed，`pickupVerified:false` 明确表示没有确认掉落物入包。Minecraft 可能在挖掘后自动把掉落物吸进背包；此时 `collect_item` 会返回 `ITEM_ENTITY_MISSING`，应先 `inspect_inventory` 核对数量，不要重复挖同一位置或反复调用拾取。挖铁矿不一定得到同名物品，现代版本可能得到 `raw_iron`；应按当前游戏结果查询和拾取。需要“采集到背包总数为 N”时，优先使用 `gather_resource` Skill，它会在拾取前检查库存并在最终背包核验。
 
-`canSeeBlock` 检查射线遮挡，不要求当前已经朝向方块；Mineflayer 默认挖掘会转向目标。背对目标与隔墙是两种情况，转头不能消除实体障碍。
+`canSeeBlock` 检查射线遮挡，不要求当前已经朝向方块；Mineflayer 默认挖掘会转向目标。背对目标与隔墙是两种情况，转头不能消除实体障碍。采集 Skill 遇到有限遮挡时才调用 `clear_path`，清障后重新检查，不会打开全局自动挖掘。
+
+复杂矿区优先使用 Python [mine_vein Skill](../agent/skills/mine_vein/SKILL.md)。通道与拾取的最大清障数和步骤数由 Skill 统一控制；模型视图隐藏三个专用通道执行入口。通道规划优先现有道路，必要时开一人宽两格高的通道；上下移动只使用有可靠支撑的台阶，不搭柱/搭桥。矿脉只从已见种子或明确坐标沿新暴露的六邻接扩展，达到库存目标即停止。正常开路不回填，不保证能识别玩家用天然石头建造的结构；在授权矿区操作。
 
 ## 6. 放置与建造：2 个
 
@@ -299,7 +306,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "& .\scripts\test-furnace
 
 | 目标 | 现有工具可组成的流程 | 仍需调用方决定或确认 |
 | --- | --- | --- |
-| 挖一个已知坐标方块并收取掉落 | inspect_block → 必要时 find_interaction_positions/goto_position → 重新检查 → mine_block → collect_item → inspect_inventory | 方块被挡住时换哪一站位；预期掉落物名称；背包最终增量 |
+| 挖一个已知坐标方块并收取掉落 | inspect_block → 必要时 find_interaction_positions/goto_position → 重新检查 → 必要时 clear_path → 重新检查 → mine_block → nearby_entities/collect_item → inspect_inventory | 清障预算、允许破坏的天然方块、预期掉落物名称；背包最终增量 |
 | 制作工作台 | inspect_recipe(crafting_table) → craft_item(crafting_table, count=1，省略 position) → inspect_placement → place_block → inspect_inventory | 缺木材时不能跳过采集和木板合成；制作不等于放置，place_block 需要 position/reference_position/face |
 | 使用现有材料做石镐 | inspect_recipe → 确认材料和可触及工作台 → craft_item → inspect_inventory | 木棍、石料不足时先补齐；未提供工作台不能完成相应配方 |
 | 用空熔炉烧两块粗铁并取出 | inspect_smelting_recipe → open_furnace 核对空炉 → smelt_item(start) → 有界 status → take → inspect_inventory | 燃料、背包空间、真实炉子位置；占用时停止，不覆盖 |

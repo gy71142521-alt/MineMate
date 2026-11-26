@@ -45,6 +45,8 @@ class _Gather:
                      "scans": 0, "search_radius": parameters.search_radius, "coverage_complete": False,
                      "candidates_truncated": False,
                      "attempt_count": 0, "blocks_mined": 0, "attempts": [], "tool_name": None}
+        self.data.update(clear_enabled=parameters.allow_clearing, clear_budget=parameters.max_clear_blocks,
+                         cleared_blocks=0, clear_attempts=[])
 
     def progress(self, stage: str) -> None:
         self.data["stage"] = stage
@@ -157,11 +159,33 @@ class _Gather:
         for attempt in range(5):
             if await self.update_count() > previous:
                 return
+            entity_id = None
+            entity_position = None
             try:
-                await self.call("collect_item", {"item_name": self.data["item_name"], "radius": 8})
+                nearby = await self.call("nearby_entities", {})
+                for item in nearby.get("items", []):
+                    if item.get("itemName") == self.data["item_name"]:
+                        entity_id, entity_position = item.get("id"), item.get("position")
+                        break
+            except ExecutionError as error:
+                if error.uncertain or error.code != "EXECUTION_FAILED":
+                    raise
+            if self.p.allow_clearing and entity_position and self.data["clear_budget"] > 0:
+                await self.clear_path(entity_position, "pickup")
+            try:
+                args = {"item_name": self.data["item_name"], "radius": 8}
+                if entity_id is not None:
+                    args["entity_id"] = entity_id
+                await self.call("collect_item", args)
             except ExecutionError as error:
                 if error.uncertain or error.code != "ITEM_ENTITY_MISSING":
                     raise
+                if entity_id is not None:
+                    try:
+                        await self.call("collect_item", {"item_name": self.data["item_name"], "radius": 8, "entity_id": entity_id})
+                    except ExecutionError as retry_error:
+                        if retry_error.uncertain or retry_error.code not in {"ITEM_ENTITY_MISSING", "OUT_OF_RANGE"}:
+                            raise
                 if attempt < 4:
                     await asyncio.sleep(0.25)
                 continue
@@ -172,6 +196,28 @@ class _Gather:
         if await self.update_count() <= previous:
             self.progress("pickup_unconfirmed")
             raise ExecutionError("PICKUP_NOT_CONFIRMED", uncertain=True)
+
+    async def clear_path(self, target: dict, reason: str) -> bool:
+        if not self.p.allow_clearing or self.data["clear_budget"] <= 0:
+            return False
+        self.progress("clearing_path")
+        try:
+            result = await self.call("clear_path", {"position": {
+                "x": math.floor(target["x"]), "y": math.floor(target["y"]), "z": math.floor(target["z"])
+            }, "max_blocks": min(2, self.data["clear_budget"]), "max_distance": 8})
+        except ExecutionError as error:
+            if error.uncertain or error.code not in {"PATH_OUT_OF_RANGE", "PATH_BLOCK_OUT_OF_REACH", "PATH_BLOCK_NOT_SAFE", "PATH_CLEAR_UNCONFIRMED", "NO_LINE_OF_SIGHT"}:
+                raise
+            self.data["clear_attempts"].append({"reason": reason, "status": "blocked", "error": error.code})
+            self.progress("clearing_blocked")
+            return False
+        cleared = int(result.get("cleared", 0)) if isinstance(result.get("cleared", 0), int) else 0
+        self.data["clear_budget"] -= cleared
+        self.data["cleared_blocks"] += cleared
+        self.data["clear_attempts"].append({"reason": reason, "status": "completed", "cleared": cleared,
+                                             "remainingBlocked": result.get("remainingBlocked")})
+        self.runtime.report_progress(self.data)
+        return cleared > 0
 
     async def run(self) -> dict:
         world = await self.snapshot()
@@ -211,7 +257,10 @@ class _Gather:
                 entry.update(status="skipped", error="UNSAFE_TARGET")
                 self.progress("target_skipped")
                 continue
-            if not await self.approach(point, name) or await self.is_support(point):
+            reached = await self.approach(point, name)
+            if not reached and await self.clear_path(point, "target"):
+                reached = await self.approach(point, name)
+            if not reached or await self.is_support(point):
                 entry.update(status="skipped", error="TARGET_UNREACHABLE_OR_CHANGED")
                 self.progress("target_skipped")
                 continue
@@ -226,9 +275,20 @@ class _Gather:
             except ExecutionError as error:
                 if error.uncertain or error.code not in {"UNSAFE_TARGET", "NO_LINE_OF_SIGHT", "OUT_OF_RANGE", "BLOCK_CHANGED", "NOT_DIGGABLE", "CHUNK_UNAVAILABLE", "PROTECTED_BLOCK"}:
                     raise
-                entry.update(status="skipped", error=error.code)
-                self.progress("target_skipped")
-                continue
+                if error.code == "NO_LINE_OF_SIGHT" and await self.clear_path(point, "target_line_of_sight"):
+                    try:
+                        result = await self.call("mine_block", {"block_name": name, "position": point,
+                            **({"tool_name": self.data["tool_name"]} if self.data["tool_name"] else {})})
+                    except ExecutionError as retry_error:
+                        if retry_error.uncertain or retry_error.code not in {"NO_LINE_OF_SIGHT", "OUT_OF_RANGE", "BLOCK_CHANGED", "NOT_DIGGABLE"}:
+                            raise
+                        entry.update(status="skipped", error=retry_error.code)
+                        self.progress("target_skipped")
+                        continue
+                else:
+                    entry.update(status="skipped", error=error.code)
+                    self.progress("target_skipped")
+                    continue
             if result.get("blockRemoved") is not True:
                 raise ExecutionError("MINING_NOT_CONFIRMED", uncertain=True)
             self.data["blocks_mined"] += 1

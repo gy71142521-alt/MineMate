@@ -21,7 +21,7 @@
 3. 选最近、未尝试过的坐标。记录尝试次数，脚下支撑直接跳过，不能重复锁定该坐标。
 4. 足够近时 `inspect_block`；名称、可见性和可挖标记有效才继续。
 5. 需要接近时 `find_interaction_positions` 查询站位，最多尝试 3 个。导航用 `goto_position(wait_seconds=0)`，pending 只通过 `get_movement_task` 等待原 taskId，单次等待最多 75 秒。
-6. 每次到达后重新查询脚下支撑和 `inspect_block`。目标已变、站位不可达或视线不通时跳过候选，不挖墙、不关闭安全检查。
+6. 每次到达后重新查询脚下支撑和 `inspect_block`。目标不可达或视线不通时可调用 `clear_path`，最多消耗 Skill 清障预算；清理后重新走站位和目标检查。保护方块/未知方块不会被清除，预算耗尽则跳过。
 
 ## 4. 单次挖掘
 
@@ -33,10 +33,10 @@
 ## 5. 拾取与数量复查
 
 1. 先读背包。如果期望物品已增加，视为已自动拾取，不重复 collect_item。
-2. 否则 `collect_item(item_name, radius=8)`，复用 Node 的有界拾取导航和背包增量检查。
+2. 读取 `nearby_entities` 找同名掉落物的位置；存在时先用有限 `clear_path` 检查/清理直线路径，再调用 `collect_item(item_name, entity_id, radius=8)`。无实体感知数据时按名称拾取。
 3. 仅 ITEM_ENTITY_MISSING 允许等待 0.25 秒后重查，最多 5 次；每次先读背包，覆盖被动拾取与实体更新同时发生的情况。
 4. collect_item 报成功后仍读背包。没有真实增加则 PICKUP_NOT_CONFIRMED/uncertain，停止后续破坏。实体消失也不能当作成功。
-5. INVENTORY_FULL、超时、取消、断线、未知结果等立即停止，报告已挖数量和现场进度；已经投入的动作不回滚。
+5. INVENTORY_FULL、超时、取消、断线、未知结果等立即停止，报告已挖数量和现场进度；已经投入的动作不回滚。掉落物不可达且清障预算用完时，不继续挖新方块。
 6. 数量不足则重新从第 3 步搜索，直到达标、来源耗尽或达到 max_blocks/工具调用/时间上限。max_blocks 包括失败/跳过的不同方块尝试，不允许无限循环。
 
 ## 6. 独立最终验证与报告

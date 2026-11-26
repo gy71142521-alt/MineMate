@@ -133,7 +133,7 @@ class CraftTests(unittest.IsolatedAsyncioTestCase):
         return [n for n, _ in self.node.calls]
 
     async def test_registration_parameters_and_nested_position(self):
-        self.assertEqual([s["name"] for s in self.registry.list()], ["explore_and_find", "gather_resource", "craft_item", "smelt_item"])
+        self.assertEqual([s["name"] for s in self.registry.list()], ["explore_and_find", "gather_resource", "craft_item", "smelt_item", "mine_vein"])
         for args in ({"count": 0}, {"count": 17}, {"count": True}, {"count": "1"}, {"search_radius": 17},
                      {"item_name": "\n"}, {"table_position": {"x": 1, "y": 64, "z": 0, "shell": "run"}},
                      {"table_position": {"x": True, "y": 64, "z": 0}},

@@ -4,14 +4,14 @@ Minecraft Java Edition AI 玩伴。Node.js 负责游戏控制，Python Agent 负
 
 日志的级别、请求 ID、脱敏规则和常见错误码排查见 [日志与诊断说明](docs/logging.md)。
 
-查看 [现有工具使用指南](docs/tools-guide.md)：完整列出 39 个工具的能力、参数示例、前置条件、数量/距离限制、组合流程及常见错误。
+查看 [现有工具使用指南](docs/tools-guide.md)：列出游戏工具的能力、参数示例、前置条件、数量/距离限制、组合流程及常见错误。
 Agent 的事件日志、按玩家隔离的上下文、压缩摘要、SQLite 持久化与恢复语义见 [记忆与上下文说明](docs/memory.md)。
 
 面向中期汇报的功能与阶段总结见 [MineMate 中期汇报说明文档](docs/midterm-report.md)。
 
 新的 Planner + Executor + finish/兜底执行架构见 [任务执行架构](docs/task-runtime.md)。运行中的自然语言插话通过 `POST /api/agent/steer` 进入当前 turn 的下一步边界，由模型根据插话语义决定停止、换目标或继续。
 
-查看 [现有工具使用指南](docs/tools-guide.md)：完整列出 34 个工具的能力、参数示例、前置条件、数量/距离限制、组合流程及常见错误。
+工具目录以 Node 运行时 `GET /api/tools` 为准，Python Skill 目录通过 `GET /api/agent/skills` 查询。
 
 物品和方块名称不再由 Python 维护静态别名。涉及资源的自然语言请求会先调用 Node.js 的 `resolve_resource`，从当前 Mineflayer 运行时 registry（包括已加载的模组内容）返回候选；候选不唯一时先澄清，复杂任务由 Planner/Executor 运行时处理，支持优先路由已注册 Skill。
 
@@ -30,6 +30,8 @@ Task 006.5 已实现阶段 A 基础设施，以及 `explore_and_find`、`gather_
 第四个技能见 [smelt_item 技能说明](agent/skills/smelt_item/SKILL.md) 和 [熔炼 SOP](agent/skills/smelt_item/SOP.md)。给 Bot 64 个粗铁和 8 个煤炭，在 16 格内放置空普通熔炉，运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-smelt-skill.ps1 -Player Steve -ItemName raw_iron -Count 64`：找兼容炉、精确接近、投放原料/燃料、核验实际转移后结束并释放控制权。当前只负责启动熔炼，不等待加工、不取产品、不自动补燃料，尚未实现收集 Skill。`count` 是本次新增原料总数（1～64）；优先填当前炉，剩余量使用其它炉。`-UseExisting` 允许同工艺续接但不取走原有产品，输出满槽时跳过。结果 `completion_scope=furnace_loading`，`smelting_completed=null`；弱燃料待补量或剩余燃烧容量未知会明确提示。总容量不足保留已投/剩余量，停止或断线不回滚材料。
 
 自然语言目标采用 **Skill 优先**：搜索、采集、合成、启动熔炼优先走 `execute_skill`；合成和方块搜索的重叠底层入口已从模型工具列表移除，旧记忆输出这些调用时会被拦截。放工作台、具体坐标挖掘、战斗索敌、独立补燃料/取产品等操作仍使用 Tool。重启 Python 后可从 `[Skills] 模型选择 skill=... arguments=...` 查看参数；无需重置记忆。规则、边界和验收示例见 [任务执行架构](docs/task-runtime.md#41-skill-优先路由)。
+
+新增第五个 Skill [mine_vein](agent/skills/mine_vein/SKILL.md)：采矿优先调用，沿新暴露的六面相邻矿石采集；必要时按挖掘成本规划有限两格高通道，单步清障、导航并重新检查，拾取也使用同一预算。不会挖空包围盒、搭块或启用全局自动挖掘。重启 Node/Python 后可说“采集这片铁矿，让背包有3个粗铁”，或运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-mine-vein.ps1 -Player Steve -Resource raw_iron -Count 3`；明确种子加 `-SeedX 10 -SeedY 64 -SeedZ 8`。count 包含已有库存；单脉不足如实返回缺口。详细顺序、边界和游戏验收见 [矿脉 SOP](agent/skills/mine_vein/SOP.md)。普通采集 Skill 保持兼容；矿脉 Skill 尚须真实 Minecraft 验收。
 
 ## 临时测试启动器（Windows）
 
