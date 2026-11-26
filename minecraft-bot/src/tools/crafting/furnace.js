@@ -1,4 +1,4 @@
-const { object, text, number, position } = require('../schema');
+const { object, text, number, position, describe } = require('../schema');
 const { ensure, items, count, state } = require('../common');
 const { interact } = require('../interaction');
 const { SMELTING, FUEL } = require('./data');
@@ -55,7 +55,11 @@ async function observe(ctx, read) {
 module.exports = function registerFurnaceTools(registry) {
   registry.register({ name: 'furnace_add_input',
     description: '向指定普通熔炉添加或补充本次数量的原料（1～64）；允许同类追加，不覆盖其它原料/产品。输出已满先取产品。只确认投料，不表示熔炼完成，不自动寻找其它熔炉。',
-    parameters: object({ position, item_name: text, count: number(1, 64, true) }),
+    parameters: object({
+      position: describe(position, '目标普通熔炉的整数方块坐标；不是新熔炉位置。'),
+      item_name: describe(text, '要投入的原料真实名称，例如 raw_iron、sand。'),
+      count: describe(number(1, 64, true), '本次新增投入的原料数量（1-64）；允许同类追加，不覆盖其它原料。'),
+    }),
     execute(ctx, a) {
       return interact(ctx, a.position, 'furnace', async (window, adapter) => {
         const { bot } = ctx, item = sourceItem(bot, a.item_name);
@@ -80,7 +84,11 @@ module.exports = function registerFurnaceTools(registry) {
   });
   registry.register({ name: 'furnace_add_fuel',
     description: '向指定普通熔炉添加或补充本次数量的燃料（1～64，默认1）；fuel_name 可省略，空槽优先煤炭、没有则其它已支持可燃物。非空槽只同类追加，不替换旧燃料；count 是燃料件数，不是原料数量。',
-    parameters: object({ position, fuel_name: text, count: number(1, 64, true) }, ['position']),
+    parameters: object({
+      position: describe(position, '目标普通熔炉的整数方块坐标；不是新熔炉位置。'),
+      fuel_name: describe(text, '可选：燃料真实名称；省略时空槽优先煤炭，没有则选择其它已支持燃料。'),
+      count: describe(number(1, 64, true), '本次添加的燃料件数（1-64，默认 1）；不是原料数量。'),
+    }, ['position']),
     execute(ctx, a) {
       return interact(ctx, a.position, 'furnace', async (window, adapter) => {
         const { bot } = ctx, item = fuelItem(bot, window, a), requested = a.count ?? 1;
@@ -107,7 +115,11 @@ module.exports = function registerFurnaceTools(registry) {
   });
   registry.register({ name: 'furnace_take_output',
     description: '从指定普通熔炉取出当前输出整栈（最多64）；item_name 必填校验名称，count 可选且必须等于当前整栈数量。可在加工中取出，不要求原料/燃料槽为空；需足够背包空间并核验真实增减，不支持部分取出。',
-    parameters: object({ position, item_name: text, count: number(1, 64, true) }, ['position', 'item_name']),
+    parameters: object({
+      position: describe(position, '目标普通熔炉的整数方块坐标。'),
+      item_name: describe(text, '输出槽中要取出的物品真实名称，必须与当前产物一致。'),
+      count: describe(number(1, 64, true), '可选：必须等于当前输出整栈数量；不支持部分取出。'),
+    }, ['position', 'item_name']),
     execute(ctx, a) {
       return interact(ctx, a.position, 'furnace', async (window, adapter) => {
         const { bot } = ctx, product = window.outputItem();

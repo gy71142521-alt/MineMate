@@ -1,4 +1,4 @@
-const { object, position } = require('../schema');
+const { object, position, describe } = require('../schema');
 const { blockAt, ensure, state } = require('../common');
 const { withWindow } = require('./window');
 const adapters = [require('./adapters/workbench'), require('./adapters/furnace'), require('./adapters/container')];
@@ -10,10 +10,14 @@ async function interact(ctx, p, type, use) {
 }
 function registerInteraction(registry) {
   for (const type of ['workbench', 'furnace', 'container']) {
-    registry.register({ name: `open_${type}`, description: `打开并检查 ${type} 窗口后关闭；只返回可序列化快照，不保留窗口句柄。`, parameters: object({ position }),
+    registry.register({ name: `open_${type}`, description: `打开并检查 ${type} 窗口后关闭；只返回可序列化快照，不保留窗口句柄。`, parameters: object({
+      position: describe(position, `要打开的 ${type} 方块整数坐标 {x,y,z}。`),
+    }),
       execute: (ctx, a) => interact(ctx, a.position, type, (window, adapter) => state('completed', adapter.inspect(window))) });
   }
-  registry.register({ name: 'interact_block', description: '交互明确指定的门、按钮或拉杆；功能方块使用独立窗口工具。', parameters: object({ position }),
+  registry.register({ name: 'interact_block', description: '交互明确指定的门、按钮或拉杆；功能方块使用独立窗口工具。', parameters: object({
+      position: describe(position, '要交互的门、按钮或拉杆整数坐标 {x,y,z}。'),
+    }),
     async execute(ctx, a) {
       const block = blockAt(ctx, a.position);
       ensure(/(?:_door|_button)$|^lever$/.test(block.name), 'UNSUPPORTED_BLOCK', '普通交互仅支持门、按钮和拉杆。');

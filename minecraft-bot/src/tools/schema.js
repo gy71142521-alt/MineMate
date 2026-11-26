@@ -1,5 +1,8 @@
 // 有限 JSON Schema 子集；目录定义是唯一来源，两端只实现通用校验器。
 const number = (minimum, maximum, integer = false) => ({ type: integer ? 'integer' : 'number', minimum, maximum });
+// JSON Schema allows a description on every property; the validators only read
+// type/constraints, so parameter docs stay in Node and do not need Python copies.
+const describe = (schema, description) => ({ ...schema, description });
 // 允许模组资源的 namespace:path 及路径中的连字符；最终名称仍由运行时 registry 校验。
 const text = { type: 'string', minLength: 1, maxLength: 64, pattern: '^[a-z][a-z0-9_.:/-]*$' };
 const object = (properties = {}, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
@@ -18,4 +21,4 @@ function validate(schema, value) {
   if (schema.type === 'string') return typeof value === 'string' && value.length >= (schema.minLength ?? 0) && value.length <= (schema.maxLength ?? 128) && (!schema.pattern || new RegExp(schema.pattern).test(value));
   return false;
 }
-module.exports = { number, text, object, position, validate };
+module.exports = { number, text, object, position, describe, validate };

@@ -4,6 +4,8 @@
 
 文中范围和数量是代码默认值或硬限制，不代表 Minecraft 本身的限制。示例坐标、玩家昵称和实体 ID 仅展示格式，使用前应替换为当前世界的真实信息。源码更新后，以 `GET /api/tools` 返回的实际 Schema 为准。
 
+> 所有 Node 工具参数在 `parameters.properties` 中都带 `description`，说明默认值、单位、可省略条件和与其他参数的关系。Python 通过 `GET /api/tools` 获取同一份描述，不维护副本。
+
 ## 1. 先区分三种使用方式
 
 | 使用方式 | 入口 | 当前行为 |

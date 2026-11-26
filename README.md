@@ -9,7 +9,7 @@ Agent 的事件日志、按玩家隔离的上下文、压缩摘要、SQLite 持�
 
 面向中期汇报的功能与阶段总结见 [MineMate 中期汇报说明文档](docs/midterm-report.md)。
 
-新的 Planner + Executor + finish/兜底执行架构见 [任务执行架构](docs/task-runtime.md)。运行中的自然语言插话通过 `POST /api/agent/steer` 进入当前 turn 的下一步边界，由模型根据插话语义决定停止、换目标或继续。
+新的 Planner + Executor + finish/兜底执行架构见 [任务执行架构](docs/task-runtime.md)。 未解决问题与后续优先级见 [TODO](docs/todo.md)。运行中的自然语言插话通过 `POST /api/agent/steer` 进入当前 turn 的下一步边界，由模型根据插话语义决定停止、换目标或继续。
 
 工具目录以 Node 运行时 `GET /api/tools` 为准，Python Skill 目录通过 `GET /api/agent/skills` 查询。
 

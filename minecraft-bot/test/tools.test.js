@@ -89,4 +89,26 @@ test('旧请求的延迟取消不能取消另一项新操作', async () => {
   release({ status: 'completed' });
   assert.equal((await pending).success, true);
 });
+test('每个工具参数都带有可供模型读取的 description', () => {
+  const bot = new EventEmitter();
+  Object.assign(bot, { entity: { position: new Vec3(0, 64, 0) }, isAlive: true });
+  const registry = createToolSystem(bot, {
+    movement: { stop: () => ({ ok: true }), follow: () => ({ ok: true }), goTo: () => ({ ok: true }) },
+    logger: { log() {}, error() {} },
+  });
+  const definitions = registry.list();
+  assert.ok(definitions.length >= 39);
+  for (const definition of definitions) {
+    for (const [name, schema] of Object.entries(definition.parameters.properties ?? {})) {
+      assert.equal(typeof schema.description, 'string', `${definition.name}.${name}`);
+      assert.ok(schema.description.trim().length >= 4, `${definition.name}.${name}`);
+    }
+  }
+  const collect = definitions.find((item) => item.name === 'collect_item');
+  assert.match(collect.parameters.properties.item_name.description, /nearby_entities|真实/);
+  const goto = definitions.find((item) => item.name === 'goto_position');
+  assert.match(goto.parameters.properties.arrival_range.description, /0.*2/);
+  registry.dispose();
+});
+
 module.exports = { fixture };

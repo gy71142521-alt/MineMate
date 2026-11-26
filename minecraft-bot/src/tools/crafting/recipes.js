@@ -1,11 +1,14 @@
-const { object, text, number } = require('../schema');
+const { object, text, number, describe } = require('../schema');
 const { ensure, items, state } = require('../common');
 const { SMELTING, FUEL } = require('./data');
 
 module.exports = function registerRecipes(registry) {
   registry.register({ name: 'inspect_smelting_recipe', description: '只读查询现有普通熔炉适配器支持的原料、产物、燃料用量与背包缺口，不投入物品。仅表示已实现的基础熔炼能力。', mutates: false,
     // 只读查询可覆盖炉内旧原料与新增原料的完整队列，单槽最多64。
-    parameters: object({ item_name: text, count: number(1, 64, true) }, ['item_name']),
+    parameters: object({
+      item_name: describe(text, '要查询熔炼配方的原料真实名称，例如 raw_iron。'),
+      count: describe(number(1, 64, true), '计划处理的原料数量（1-64，默认 1）。'),
+    }, ['item_name']),
     execute({ bot }, a) {
       const output = SMELTING[a.item_name], amount = a.count ?? 1, inventory = items(bot);
       ensure(output && bot.registry.itemsByName[a.item_name] && bot.registry.itemsByName[output], 'UNSUPPORTED_RECIPE', '当前版本或适配器不支持该熔炼配方。');
@@ -20,7 +23,11 @@ module.exports = function registerRecipes(registry) {
     }
   });
   registry.register({ name: 'inspect_recipe', description: '只读查询当前版本合成配方、材料、整批产量、工作台需求和背包缺口。不合成，不寻找或打开工作台。', mutates: false,
-    parameters: object({ item_name: text, count: number(1, 64, true), max_results: number(1, 16, true) }, ['item_name']),
+    parameters: object({
+      item_name: describe(text, '要查询合成配方的目标物品真实名称。'),
+      count: describe(number(1, 64, true), '期望得到的产物数量（1-64，默认 1）。'),
+      max_results: describe(number(1, 16, true), '最多返回多少个配方变体（1-16，默认 8）。'),
+    }, ['item_name']),
     execute({ bot }, a) {
       const type = bot.registry.itemsByName[a.item_name]?.id;
       ensure(Number.isInteger(type), 'UNKNOWN_ITEM', '当前版本没有指定物品。');

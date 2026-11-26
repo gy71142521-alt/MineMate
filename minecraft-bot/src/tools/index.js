@@ -1,5 +1,5 @@
 const { createRegistry } = require('./registry');
-const { object, number } = require('./schema');
+const { object, number, describe } = require('./schema');
 const { ensure, state } = require('./common');
 const { navigate } = require('./movement/navigation');
 const { registerResourceTools } = require('./perception/resources');
@@ -19,7 +19,13 @@ function createToolSystem(bot, options = {}) {
   registry.register({ name: 'follow_player', description: '持续跟随发出请求的玩家，直到停止或目标丢失。', parameters: object(), movement: true, compatibleControls: true,
     execute: ({ movement, username }) => movementResult(movement.follow(username)) });
   registry.register({ name: 'goto_position', description: '坐标导航，默认最多等 15 秒；completed 表示满足到达半径，交互前仍须复查距离/视线。pending 尚未到达。arrival_range 可选 0～2，默认 2；0 要求进入指定脚部方块，且该位置与头部必须是空气，用于交互站位。wait_seconds=0 立即返回。不会自动攻击或挖掘。',
-    parameters: object({ x: number(-29999984, 29999984), y: number(-2048, 2047), z: number(-29999984, 29999984), wait_seconds: number(0, 15), arrival_range: number(0, 2) }, ['x', 'y', 'z']), movement: true, compatibleControls: true,
+    parameters: object({
+      x: describe(number(-29999984, 29999984), '目标脚部方块 X 坐标；世界坐标，导航时会向下取整。'),
+      y: describe(number(-2048, 2047), '目标脚部方块 Y 坐标；必须当前维度有效。'),
+      z: describe(number(-29999984, 29999984), '目标脚部方块 Z 坐标；世界坐标，导航时会向下取整。'),
+      wait_seconds: describe(number(0, 15), '本次调用最多等待多少秒（0-15，默认 15）；0 表示立即返回 pending/completed，不等待到达。'),
+      arrival_range: describe(number(0, 2), '到达半径（0-2，默认 2）；0 表示必须站进目标脚部方块，且脚部/头部必须为空气，用于精确交互站位。'),
+    }, ['x', 'y', 'z']), movement: true, compatibleControls: true,
     execute: navigate });
   require('./movement/tools')(registry);
   require('./movement/queries')(registry);

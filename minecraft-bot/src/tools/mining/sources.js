@@ -1,4 +1,4 @@
-const { object, text, number } = require('../schema');
+const { object, text, number, describe } = require('../schema');
 const { ensure, state } = require('../common');
 
 // 当前 minecraft-data / prismarine-block drops 类型：数字或 {drop: 数字/{id, metadata}}。
@@ -12,7 +12,11 @@ function dropId(value) {
 module.exports = function registerMiningSources(registry) {
   registry.register({ name: 'inspect_mining_sources',
     description: '只读从当前运行时方块 drops 数据查询物品的可能采集来源。不会扫描或挖掘世界；不保证附魔/数据包实际掉落，必须以最终背包验证。可指定 block_name 检查来源。',
-    parameters: object({ item_name: text, block_name: text, max_results: number(1, 16, true) }, ['item_name']), mutates: false,
+    parameters: object({
+      item_name: describe(text, '要查询掉落来源的物品真实名称，例如 cobblestone、raw_iron。'),
+      block_name: describe(text, '可选：只检查某个来源方块名称，例如 stone；省略则查询所有支持来源。'),
+      max_results: describe(number(1, 16, true), '最多返回多少候选来源（1-16，默认 16）。'),
+    }, ['item_name']), mutates: false,
     execute({ bot }, a) {
       const item = bot.registry?.itemsByName?.[a.item_name];
       ensure(Number.isInteger(item?.id), 'UNKNOWN_ITEM', '当前版本不存在指定物品。');

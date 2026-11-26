@@ -1,4 +1,4 @@
-const { object, text, number, position } = require('../schema');
+const { object, text, number, position, describe } = require('../schema');
 const { ensure, count, itemByName, state } = require('../common');
 const { interact } = require('../interaction');
 
@@ -7,7 +7,11 @@ const { SMELTING, FUEL } = require('./data');
 function registerCrafting(registry) {
   require('./furnace')(registry);
   registry.register({ name: 'craft_item', description: '检查当前版本配方与材料并合成目标物品；position 仅表示已有工作台，不需要工作台的配方省略它；本工具不放置产物。',
-    parameters: object({ item_name: text, count: number(1, 16, true), position }, ['item_name', 'count']),
+    parameters: object({
+      item_name: describe(text, '要合成的目标物品真实名称，例如 oak_planks、wooden_axe。'),
+      count: describe(number(1, 16, true), '期望新增的产物数量（1-16）；多产物配方可能按整批产出更多。'),
+      position: describe(position, '可选：已有工作台的整数坐标；不需要工作台的配方必须省略，本工具不放置工作台。'),
+    }, ['item_name', 'count']),
     async execute(ctx, a) {
       const { bot } = ctx;
       const type = bot.registry.itemsByName[a.item_name]?.id;
@@ -32,7 +36,14 @@ function registerCrafting(registry) {
     }
   });
   registry.register({ name: 'smelt_item', description: '分阶段操作普通熔炉：start 放入原料燃料并返回 pending；status 查进度；take 取出已确认的整批产物。',
-    parameters: object({ position, action: { type: 'string', enum: ['start', 'status', 'take'] }, item_name: text, fuel_name: text, count: number(1, 64, true), fuel_count: number(1, 64, true) }, ['position', 'action']),
+    parameters: object({
+      position: describe(position, '目标普通熔炉的整数方块坐标。'),
+      action: describe({ type: 'string', enum: ['start', 'status', 'take'] }, 'start 开始投料、status 查询进度、take 取出已确认整批产物。'),
+      item_name: describe(text, 'start/take 使用的原料或产物真实名称。'),
+      fuel_name: describe(text, '可选：start 使用的燃料真实名称。'),
+      count: describe(number(1, 64, true), 'start/take 的整批数量（1-64）。'),
+      fuel_count: describe(number(1, 64, true), '可选：start 要投入的燃料件数（1-64）。'),
+    }, ['position', 'action']),
     async execute(ctx, a) {
       const { bot } = ctx;
       let input, fuel;
